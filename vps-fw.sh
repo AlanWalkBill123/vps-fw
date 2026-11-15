@@ -13,14 +13,20 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.0"
+VERSION="3.1.1"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
+# 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
+# 若在函数内判断，当前目录下名为 main 的文件会被误当作脚本本体安装。
+SCRIPT_SELF="${BASH_SOURCE[0]:-}"
 
 EXEC_PATH="/usr/local/sbin/vps-fw"
 BIN_LINK="/usr/local/bin/fw"
 CONF_DIR="/etc/vps-fw"
 LOCK_FILE="/run/vps-fw.lock"
+GUARD_LOCK_FILE="/run/vps-fw-guard.lock"
+GUARD_UNIT="vps-fw-quarantine.service"
+WATCH_BUSY_FILE="/run/vps-fw-watch-busy.since"
 TABLE_NAME="vps_fw"
 
 DEMO_MODE=0
@@ -393,11 +399,17 @@ validate_iface() {
   [[ "$x" =~ ^[a-zA-Z0-9_.-]{1,15}$ ]]
 }
 
-validate_ports() {
-  local raw s out="" tok a b
-  raw="$(to_lower "$(trim "$1")")"
+# normalize_* 把结果写入全局 NORM_OUT 且不产生任何子进程：
+# 守护审计每 5 秒校验整个规则库，逐条 fork 会在规则多时拖垮 CPU 并触发审计超时隔离。
+NORM_OUT=""
+normalize_ports() {
+  local raw="$1" out="" tok a b
+  local -a parts=()
+  NORM_OUT=""
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
   case "$raw" in
-    any|\*|all) printf 'any'; return 0 ;;
+    [aA][nN][yY]|\*|[aA][lL][lL]) NORM_OUT="any"; return 0 ;;
   esac
   raw="${raw//，/,}"
   raw="${raw// /,}"
@@ -424,7 +436,12 @@ validate_ports() {
     fi
   done
   [[ -n "$out" ]] || return 1
-  printf '%s' "$out"
+  NORM_OUT="$out"
+}
+
+validate_ports() {
+  normalize_ports "$1" || return 1
+  printf '%s' "$NORM_OUT"
 }
 
 validate_ipv4_cidr() {
@@ -432,7 +449,8 @@ validate_ipv4_cidr() {
   if [[ "$s" == */* ]]; then
     ip="${s%%/*}"
     mask="${s#*/}"
-    [[ "$mask" =~ ^[0-9]{1,2}$ ]] && (( 10#$mask >= 0 && 10#$mask <= 32 )) || return 1
+    # 不接受前导零：nft 按 C 语言规则解析数字，/010 会被当作八进制
+    [[ "$mask" =~ ^(0|[1-9][0-9]?)$ ]] && (( mask <= 32 )) || return 1
   else
     ip="$s"
   fi
@@ -445,24 +463,27 @@ validate_ipv4_cidr() {
   (( 10#$o1 <= 255 && 10#$o2 <= 255 && 10#$o3 <= 255 && 10#$o4 <= 255 ))
 }
 
-validate_cidrs() {
-  local raw tok out="" seen=","
-  raw="$(trim "$1")"
+normalize_cidrs() {
+  local raw="$1" tok out="" seen=","
+  local -a parts=()
+  NORM_OUT=""
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
   raw="${raw//，/,}"
-  raw="$(printf '%s' "$raw" | tr -s '[:space:]' ',')"
+  raw="${raw//[[:space:]]/,}"
   [[ -z "$raw" ]] && return 1
   IFS=',' read -r -a parts <<< "$raw"
   for tok in "${parts[@]}"; do
     [[ -z "$tok" ]] && continue
-    local low
-    low="$(to_lower "$tok")"
-    if [[ "$low" == "any" || "$low" == "*" || "$low" == "all" ]]; then
-      if (( ${#parts[@]} > 1 )); then
-        return 1
-      fi
-      printf 'any'
-      return 0
-    fi
+    case "$tok" in
+      [aA][nN][yY]|\*|[aA][lL][lL])
+        if (( ${#parts[@]} > 1 )); then
+          return 1
+        fi
+        NORM_OUT="any"
+        return 0
+        ;;
+    esac
     if validate_ipv4_cidr "$tok" || validate_ipv6_cidr "$tok"; then
       if [[ "$seen" != *",$tok,"* ]]; then
         seen+="$tok,"
@@ -473,7 +494,12 @@ validate_cidrs() {
     fi
   done
   [[ -n "$out" ]] || return 1
-  printf '%s' "$out"
+  NORM_OUT="$out"
+}
+
+validate_cidrs() {
+  normalize_cidrs "$1" || return 1
+  printf '%s' "$NORM_OUT"
 }
 
 sanitize_comment() {
@@ -496,6 +522,10 @@ add_rule_to_dir() {
   rf="$(rules_file "$dir")"
   touch "$rf" || return 1
   chmod 600 "$rf" || return 1
+  # Imported databases may have a valid final row without LF. Separate the next row.
+  if [[ -s "$rf" && -n "$(tail -c 1 "$rf")" ]]; then
+    printf '\n' >> "$rf" || return 1
+  fi
   printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "$rid" "$enabled" "$action" "$rdir" "$scope" "$proto" "$ports" "$cidr" "$(sanitize_comment "$comment")" >> "$rf" || return 1
   printf '%s' "$rid"
@@ -654,6 +684,7 @@ table inet $TABLE_NAME {
     iifname "$wan" meta nfproto ipv4 udp sport 67 udp dport 68 accept
     iifname "$wan" meta nfproto ipv6 udp sport 547 udp dport 546 accept
     iifname "$wan" meta nfproto ipv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+    iifname "$wan" ip6 saddr fe80::/10 icmpv6 type mld-listener-query accept
     iifname "$wan" meta nfproto ipv4 icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
 EOF
   [[ $? == 0 ]] || return 1
@@ -704,7 +735,7 @@ EOF
   # 用户入站规则 (宿主机)
   if [[ -f "$rf" ]]; then
     local rid enabled action rdir scope proto ports cidr comment
-    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
       [[ -z "$rid" || "$rid" == \#* ]] && continue
       [[ "$enabled" != "1" ]] && continue
       [[ "$rdir" != "in" ]] && continue
@@ -746,7 +777,7 @@ EOF
 EOF
   [[ $? == 0 ]] || return 1
   if [[ -f "$rf" ]]; then
-    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
       [[ -z "$rid" || "$rid" == \#* ]] && continue
       [[ "$enabled" != "1" ]] && continue
       [[ "$rdir" != "in" ]] && continue
@@ -763,7 +794,7 @@ EOF
 EOF
   [[ $? == 0 ]] || return 1
   if [[ -f "$rf" ]]; then
-    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
       [[ -z "$rid" || "$rid" == \#* ]] && continue
       [[ "$enabled" != "1" ]] && continue
       [[ "$rdir" != "in" ]] && continue
@@ -782,7 +813,7 @@ EOF
 EOF
   [[ $? == 0 ]] || return 1
   if [[ -f "$rf" ]]; then
-    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
       [[ -z "$rid" || "$rid" == \#* ]] && continue
       [[ "$enabled" != "1" ]] && continue
       [[ "$rdir" != "out" ]] && continue
@@ -820,19 +851,29 @@ EOF
     oifname "$wan" meta nfproto ipv4 udp sport 68 udp dport 67 accept
     oifname "$wan" meta nfproto ipv6 udp sport 546 udp dport 547 accept
     oifname "$wan" meta nfproto ipv6 icmpv6 type { nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+    oifname "$wan" meta nfproto ipv6 icmpv6 type { mld-listener-report, mld-listener-done, mld2-listener-report } accept
     oifname "$wan" meta nfproto ipv4 icmp type { destination-unreachable, time-exceeded, parameter-problem } accept
 EOF
   [[ $? == 0 ]] || return 1
   for bridge_pattern in docker0 'br-*' 'podman*'; do
     printf '    oifname != "%s" oifname "%s" ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept\n' "$wan" "$bridge_pattern" >> "$out_file" || return 1
   done
+  # 信任接口不隐式豁免出站；仅保留 IPv6 邻居发现控制报文。
+  local out_tif
+  local -a out_tifs=()
+  IFS=',' read -r -a out_tifs <<< "$CFG_TRUSTED_IFS"
+  for out_tif in ${out_tifs[@]+"${out_tifs[@]}"}; do
+    out_tif="$(trim "$out_tif")"
+    [[ -n "$out_tif" ]] || continue
+    printf '    oifname "%s" ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept\n' "$out_tif" >> "$out_file" || return 1
+  done
   if [[ -f "$rf" ]]; then
-    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+    while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
       [[ -z "$rid" || "$rid" == \#* ]] && continue
       [[ "$enabled" != "1" ]] && continue
       [[ "$rdir" != "out" ]] && continue
       [[ "$scope" == "all" || "$scope" == "host" ]] || continue
-      emit_rule_lines "$out_file" "    " "oifname \"$wan\"" "$rdir" "$scope" "$action" "$proto" "$ports" "$cidr" "$rid" "0" || return 1
+      emit_rule_lines "$out_file" "    " "" "$rdir" "$scope" "$action" "$proto" "$ports" "$cidr" "$rid" "0" || return 1
     done < "$rf"
   fi
   cat >> "$out_file" <<EOF
@@ -889,7 +930,7 @@ evaluate_port_decision() {
   rf="$(rules_file "$dir_check")"
   [[ -f "$rf" ]] || { printf 'default-drop||'; return; }
   local rid enabled action rdir scope proto ports cidr comment
-  while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+  while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
     [[ -z "$rid" || "$rid" == \#* || "$enabled" != "1" ]] && continue
     [[ "$rdir" != "in" ]] && continue
     if [[ "$scope" != "all" && "$scope" != "$scope_need" ]]; then
@@ -1066,6 +1107,11 @@ render_dashboard() {
   printf '%s%s%s\n' "$C_CYAN" "$bot" "$C_RESET"
 
   # 提示条
+  if (( DEMO_MODE == 0 )) && [[ -f "$CONF_DIR/locked.state" ]]; then
+    local lock_reason
+    lock_reason="$(head -n1 "$CONF_DIR/locked.state" 2>/dev/null || true)"
+    printf '  %s[!] 隔离原因: %s -> VNC 中执行 fw restore；有未确认修改时用 [6] 重新应用或 fw recover 版本ID%s\n' "$C_RED$C_BOLD" "${lock_reason:-未记录（systemd 应急隔离）}" "$C_RESET"
+  fi
   if [[ -f "$(pend_file "$CONF_DIR")" ]]; then
     local start_ep secs_tot elapsed rem
     start_ep="$(awk -F= '/^START_EPOCH=/{print $2; exit}' "$(pend_file "$CONF_DIR")")"
@@ -1102,7 +1148,7 @@ render_rules_table() {
   fi
 
   local rid enabled action rdir scope proto ports cidr comment
-  while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment; do
+  while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
     [[ -z "$rid" || "$rid" == \#* ]] && continue
     local st_s act_s pr_s pt_s ip_s sc_s cm_s row
     [[ "$enabled" == "1" ]] && st_s="${C_GREEN}启用${C_RESET}" || st_s="${C_DIM}停用${C_RESET}"
@@ -1124,17 +1170,66 @@ render_rules_table() {
 }
 
 # ---------- 首次向导 ----------
+# 隔离后唯一的恢复入口是 VNC 控制台，而控制台登录需要密码；仅密钥登录的云镜像 root 密码通常是锁定的。
+warn_if_no_console_login() {
+  command -v passwd >/dev/null 2>&1 || return 0
+  local pw_state
+  pw_state="$(passwd -S root 2>/dev/null | awk '{print $2}')" || return 0
+  case "$pw_state" in
+    L*) warn "root 密码处于锁定状态。超时或异常隔离后只能从 VNC 控制台恢复，请先确认至少有一个账号能在控制台用密码登录（例如先执行 passwd root）。" ;;
+  esac
+  return 0
+}
+
+# 草稿中是否仍有 SSH 入口；没有则输出原因并返回 0（应用后只能走 VNC）
+draft_ssh_lockout_reason() {
+  load_conf "$DRAFT_DIR" >/dev/null 2>&1 || { printf '无法读取草稿，不能判断 SSH 策略'; return 0; }
+  local rid enabled action rdir scope proto ports cidr comment allow=0
+  if [[ "$CFG_SSH_MODE" != none && -n "$CFG_SSH_BLOCK" ]]; then
+    printf '存在 SSH 独立黑名单，需核对它是否覆盖管理来源'; return 0
+  fi
+  while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
+    [[ -n "$rid" && "$rid" != \#* && "$enabled" == 1 && "$rdir" == in ]] || continue
+    [[ "$scope" == host || "$scope" == all ]] || continue
+    [[ "$proto" == tcp || "$proto" == both || "$proto" == any ]] || continue
+    port_in_spec "$ports" "$CFG_SSH_PORT" || continue
+    if [[ "$action" == drop ]]; then
+      printf '规则 #%s 拒绝 SSH 端口，需要核对来源与规则顺序（此处为保守告警）' "$rid"; return 0
+    fi
+    [[ "$action" != accept ]] || allow=1
+  done < "$(rules_file "$DRAFT_DIR")"
+  [[ -z "$CFG_TRUSTED_IFS" ]] || return 1
+  [[ "$CFG_SSH_MODE" != whitelist ]] || return 1
+  if [[ "$CFG_SSH_MODE" == hidden ]]; then
+    printf 'SSH 隐身模式已开启，但没有信任内网网卡'; return 0
+  fi
+  (( allow == 0 )) || return 1
+  printf '没有放行 SSH 端口 %s/TCP 的规则，也没有信任内网网卡' "$CFG_SSH_PORT"
+}
+confirm_ssh_lockout_risk() {
+  local why
+  why="$(draft_ssh_lockout_reason)" || { info "配置检查不能证明 SSH 可达；应用后仍需新连接验证。"; return 0; }
+  warn "${why}。可能阻断新的 SSH 连接；请准备可登录的商家控制台。"
+  ask_yesno "仍然继续应用？" "n"
+}
+
 first_time_setup() {
   clear_screen
   printf '%s━━ 首次配置向导 (失败封闭初始化) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n' "$C_CYAN$C_BOLD" "$C_RESET"
   local def_wan ssh_port client_ip
   def_wan="$(detect_wan_if)"
   ssh_port="$(detect_ssh_port)"
-  printf '  SSH TCP 端口 [探测建议 %s，请核对，尤其是 VNC/socket activation]: ' "$ssh_port"
   local chosen_port=""
-  read -r chosen_port || return 1
-  chosen_port="${chosen_port:-$ssh_port}"
-  [[ "$chosen_port" =~ ^[1-9][0-9]{0,4}$ ]] && (( chosen_port<=65535 )) || return 1
+  while true; do
+    printf '  SSH TCP 端口 [探测建议 %s，请核对，尤其是 VNC/socket activation]: ' "$ssh_port"
+    read -r chosen_port || return 1
+    chosen_port="$(trim "$chosen_port")"
+    chosen_port="${chosen_port:-$ssh_port}"
+    if [[ "$chosen_port" =~ ^[1-9][0-9]{0,4}$ ]] && (( chosen_port<=65535 )); then
+      break
+    fi
+    err "端口无效，请输入 1-65535 之间的数字"
+  done
   ssh_port="$chosen_port"; CFG_SSH_PORT="$ssh_port"
   client_ip="$(detect_ssh_client_ip)"
 
@@ -1174,8 +1269,11 @@ first_time_setup() {
   echo
   ok "已生成初始安全草稿（默认拦截所有其他公网入站及 Docker 端口映射）。"
   if (( DEMO_MODE == 0 )); then
+    warn_if_no_console_login
     if ask_yesno "是否现在立即应用基础防火墙保护（含 300 秒超时隔离保护）？" "y"; then
       with_lock apply_draft_to_system 1 || { err "应用失败，未确认成功"; pause_prompt; return 1; }
+      # with_lock 在子 shell 中执行，草稿状态需在此处同步
+      CHANGES_PENDING=0
       ok "基础防护已上线！请新开 SSH 窗口验证可正常登录后，在主菜单 [6] 确认保存。"
       pause_prompt
     fi
@@ -1327,14 +1425,32 @@ action_manage_rules() {
       printf '  输入要删除的规则 ID (多个用逗号隔开): '
       local rids=""
       read -r rids || return
-      rids="$(trim "${rids//，/,}")"
+      rids="${rids//，/,}"
+      rids="${rids//[[:space:]]/}"
       [[ -n "$rids" ]] || return
+      local -a del_want=()
+      local del_id del_ok="" del_miss=""
+      IFS=',' read -r -a del_want <<< "$rids"
+      for del_id in "${del_want[@]}"; do
+        del_id="${del_id#\#}"
+        [[ -z "$del_id" ]] && continue
+        if rule_exists_in_dir "$DRAFT_DIR" "$del_id"; then
+          [[ ",$del_ok," == *",$del_id,"* ]] || del_ok+="${del_ok:+,}$del_id"
+        else
+          del_miss+="${del_miss:+,}$del_id"
+        fi
+      done
+      [[ -z "$del_miss" ]] || warn "未找到规则，已忽略: $del_miss"
+      if [[ -z "$del_ok" ]]; then
+        pause_prompt
+        return
+      fi
       local tmp
       tmp="$(mktemp "$DRAFT_DIR/.rules.XXXXXX")" || return 1
-      awk -F'|' -v ids=",$rids," 'index(ids, "," $1 ",") == 0 {print}' "$rf" > "$tmp" || { rm -f "$tmp"; return 1; }
+      awk -F'|' -v ids=",$del_ok," 'index(ids, "," $1 ",") == 0 {print}' "$rf" > "$tmp" || { rm -f "$tmp"; return 1; }
       mv -f "$tmp" "$rf" || return 1
       check_draft_dirty
-      ok "已从草稿删除规则: $rids"
+      ok "已从草稿删除规则: $del_ok"
       ;;
     3)
       printf '  输入要移动的规则 ID: '
@@ -1347,7 +1463,7 @@ action_manage_rules() {
       dir_mv="$(to_lower "$(trim "$dir_mv")")"
       local -a lines=()
       local idx=0 found_idx=-1 line_txt
-      while IFS= read -r line_txt; do
+      while IFS= read -r line_txt || [[ -n "$line_txt" ]]; do
         [[ -z "$line_txt" ]] && continue
         lines+=("$line_txt")
         [[ "${line_txt%%|*}" == "$rid" ]] && found_idx=$idx
@@ -1524,7 +1640,25 @@ action_presets_menu() {
       read -r new_port || return 1
       [[ "$new_port" =~ ^[1-9][0-9]{0,4}$ ]] && (( new_port<=65535 )) || { err "端口无效"; return 1; }
       if ask_yesno "已通过 VNC/ss 确认服务监听此端口？" n; then
-        CFG_SSH_PORT="$new_port"; save_conf "$DRAFT_DIR" || return 1; check_draft_dirty
+        CFG_SSH_PORT="$new_port"; save_conf "$DRAFT_DIR" || return 1
+        if [[ "$CFG_SSH_MODE" == none ]]; then
+          # 未启用专用策略时 SSH 由普通规则放行，仅改保存的端口不会打开新端口
+          warn "当前未启用 SSH 专用策略：保存的端口不会自动改动普通放行规则，旧端口的规则请自行在 [3] 中处理。"
+          if ask_yesno "是否为新端口 ${new_port}/TCP 新增指定来源放行规则？" "n"; then
+            local new_sources=""
+            printf '  输入允许来源 IP/CIDR（必须明确输入；any 表示任意来源，留空取消）: '
+            read -r new_sources || return 1
+            if [[ -n "$new_sources" ]]; then
+              new_sources="$(validate_cidrs "$new_sources")" || { err "来源无效，未添加规则"; return 1; }
+              if [[ "$new_sources" == any ]] && ! ask_yesno "确认向任意来源开放新 SSH 端口？" "n"; then
+                info "未添加任意来源规则"
+              else
+                add_rule_to_dir "$DRAFT_DIR" 1 accept in host tcp "$new_port" "$new_sources" "SSH 新端口（明确来源）" >/dev/null || return 1
+              fi
+            fi
+          fi
+        fi
+        check_draft_dirty
       fi
       ;;
     10)
@@ -1587,7 +1721,8 @@ action_apply_confirm_menu() {
     case "$(trim "$c")" in
       1) with_lock cmd_confirm ;;
       2) with_lock quarantine "用户取消待确认配置" ;;
-      3) with_lock apply_draft_to_system 1 && CHANGES_PENDING=0 ;;
+      3) confirm_ssh_lockout_risk || return
+         with_lock apply_draft_to_system 1 && CHANGES_PENDING=0 ;;
       *) return ;;
     esac
     pause_prompt
@@ -1605,6 +1740,7 @@ action_apply_confirm_menu() {
   read -r c || return
   case "$(trim "$c")" in
     1)
+      confirm_ssh_lockout_risk || return
       if with_lock apply_draft_to_system 1; then
         CHANGES_PENDING=0
         ok "新防火墙规则已生效！请在 300 秒内新开 SSH 窗口验证可正常登录后，选 [6] -> [1] 确认保存。"
@@ -1613,6 +1749,7 @@ action_apply_confirm_menu() {
       fi
       ;;
     2)
+      confirm_ssh_lockout_risk || return
       if ask_yesno "确定不设确认倒计时、直接永久应用吗？" "n"; then
         if with_lock apply_draft_to_system 0; then
           CHANGES_PENDING=0
@@ -1818,6 +1955,10 @@ install_payload() {
   if [[ -f "$(pend_file "$CONF_DIR")" ]]; then
     err "存在待确认防火墙修改，先在 VNC 核对并重新应用/确认，再升级程序"; return 1
   fi
+  if [[ -L "$CONF_DIR/current" ]]; then
+    local saved_gen
+    saved_gen="$(active_dir)" && valid_generation "$saved_gen" || { err "保存配置不兼容或损坏，拒绝升级。请先用旧版核对 CIDR 前导零等问题并重新应用。"; return 1; }
+  fi
   if [[ -e "$BIN_LINK" && ! -L "$BIN_LINK" ]]; then
     err "快捷命令路径被普通文件占用: $BIN_LINK"; return 1
   fi
@@ -1830,8 +1971,8 @@ install_payload() {
 }
 
 self_install_if_needed() {
-  local self="${BASH_SOURCE[0]:-${0:-}}" abs_self payload expected actual
-  if [[ -f "$self" && "$self" != /dev/fd/* && "$self" != /proc/self/fd/* ]]; then
+  local self="$SCRIPT_SELF" abs_self payload expected actual
+  if [[ -n "$self" && -f "$self" && "$self" != /dev/fd/* && "$self" != /proc/self/fd/* ]]; then
     abs_self="$(cd "$(dirname "$self")" && pwd)/$(basename "$self")"
     # 包含 fw 符号链接调用：已执行安装文件时无需重新安装。
     [[ "$self" -ef "$EXEC_PATH" ]] && return 0
@@ -1868,7 +2009,7 @@ trap cleanup_exit EXIT
 # ---------- 演示模式 ----------
 run_demo() {
   DEMO_MODE=1
-  DEMO_TMP="$(mktemp -d "${TMPDIR:-/tmp}/vps-fw-demo.XXXXXX")"
+  DEMO_TMP="$(mktemp -d "${TMPDIR:-/tmp}/vps-fw-demo.XXXXXX")" && [[ -n "$DEMO_TMP" && -d "$DEMO_TMP" ]] || { DEMO_TMP=""; err "无法创建演示临时目录"; return 1; }
   CONF_DIR="$DEMO_TMP"
   DRAFT_DIR="$DEMO_TMP/draft"
   mkdir -p "$DRAFT_DIR"
@@ -1913,15 +2054,15 @@ VPS-FW v${VERSION} -- Debian / Ubuntu 主机防火墙面板
   fw rules                查看内核实际加载的 nftables 规则
   fw docker-audit         列出 Docker 映射和有来源条件的候选规则（需外部验证）
   fw confirm              确认最新修改 (取消 300 秒超时隔离)
-  fw rollback             旧命令别名：立即隔离网络（不会撤掉保护）
-  fw audit                校验保存版本与内核；异常则隔离并返回失败
+  fw rollback             旧命令别名：立即隔离网络（不会撤掉保护；终端下需输入 YES）
+  fw audit                校验保存版本与内核；异常则隔离并返回失败（未初始化时不做任何操作）
   fw restore              VNC 中人工恢复完整版本（无待确认修改时）
   fw boot-restore         由启动服务调用；未确认或损坏时持续隔离
-  fw lockdown             隔离全部非回环网络，包括已有 SSH
+  fw lockdown [--yes]     隔离全部非回环网络，包括已有 SSH（终端下需输入 YES，--yes 跳过）
   fw emergency-off        lockdown 的兼容别名
   fw bind-service NAME.service  为业务添加防火墙启动依赖
   fw health               业务启动前检查；未确认、损坏或隔离时失败
-  fw generations          列出历史版本 ID
+  fw generations          列出历史版本 ID 与创建时间（新的在前，标出 current / previous）
   fw recover VERSION_ID   VNC 中校验历史版本并重新应用（需再次 confirm）
   fw uninstall            严格模式拒绝自动卸载，请在 VNC 人工退役
   fw --demo               无需 root/nftables 安全预览面板界面与生成规则
@@ -1959,12 +2100,13 @@ main() {
     recover) [[ $# == 2 ]] || { err "用法: fw recover 24位版本ID"; return 1; }; with_lock cmd_recover "$2"; return $? ;;
     generations) list_generations; return $? ;;
     audit) with_lock cmd_audit; return $? ;;
+    watch) watch_audit; return $? ;;
     health) with_lock health_check; return $? ;;
-    lockdown) with_lock quarantine "用户请求隔离"; return $? ;;
+    lockdown) confirm_cli_lockdown "${2:-}" || return 1; with_lock quarantine "用户请求隔离"; return $? ;;
     bind-service) [[ $# == 2 ]] || return 1; with_lock bind_service "$2"; return $? ;;
     auto-rollback) shift; with_lock cmd_auto_rollback "${1:-}" 0; return $? ;;
     confirm) with_lock cmd_confirm; return $? ;;
-    rollback) with_lock quarantine "用户取消待确认修改"; return $? ;;
+    rollback) confirm_cli_lockdown "${2:-}" || return 1; with_lock quarantine "用户取消待确认修改"; return $? ;;
     rules)
       nft list table inet "$TABLE_NAME"
       return $?
@@ -1985,6 +2127,7 @@ main() {
       return $?
       ;;
     emergency-off)
+      confirm_cli_lockdown "${2:-}" || return 1
       with_lock cmd_emergency_off
       return $?
       ;;
@@ -2038,6 +2181,28 @@ with_lock() {
   command -v flock >/dev/null || { err "缺少 flock，拒绝无锁操作"; return 1; }
   ( flock -x 9 || exit 1; "$@" ) 9>"$LOCK_FILE"
 }
+with_guard() {
+  ( flock -x -w 5 8 || exit 1; "$@" ) 8>"$GUARD_LOCK_FILE"
+}
+# Busy is not an audit failure. A bounded busy period prevents a stuck owner hiding audits indefinitely.
+watch_audit() {
+  local rc
+  ( flock -n -E 75 9 || exit $?; rm -f "$WATCH_BUSY_FILE" || exit 1; cmd_audit ) 9>"$LOCK_FILE"
+  rc=$?
+  if [[ "$rc" == 75 ]]; then
+    local start now
+    now="$(date +%s)" || return 1
+    if [[ ! -e "$WATCH_BUSY_FILE" ]]; then
+      printf '%s\n' "$now" | atomic_write "$WATCH_BUSY_FILE" || return 1
+    fi
+    start="$(cat "$WATCH_BUSY_FILE")" || return 1
+    [[ "$start" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    if (( now < start || now - start >= 120 )); then
+      err "应用锁持续占用达到 120 秒或计时异常，交由独立守护隔离"; return 1
+    fi
+  fi
+  return "$rc"
+}
 lockdown_rules() {
   cat <<'EOF'
 table inet vps_fw_lockdown
@@ -2049,7 +2214,8 @@ table inet vps_fw_lockdown {
 }
 EOF
 }
-quarantine() {
+quarantine() { with_guard quarantine_locked "$@"; }
+quarantine_locked() {
   local reason="${1:-未知故障}" marked=0
   mkdir -p "$CONF_DIR" && chmod 700 "$CONF_DIR" && printf '%s\n' "$reason" | atomic_write "$CONF_DIR/locked.state" && marked=1
   if ! lockdown_rules | nft -f -; then
@@ -2058,12 +2224,53 @@ quarantine() {
   fi
   logger -t vps-fw -- "QUARANTINE: $reason" 2>/dev/null || true
   err "已进入网络隔离（包括已有 SSH）；请通过 VNC 恢复。原因: $reason"
+  if [[ "${2:-0}" == 1 ]]; then
+    if systemctl is-failed --quiet "$GUARD_UNIT"; then
+      systemctl reset-failed "$GUARD_UNIT" || return 1
+    fi
+    [[ "$marked" == 1 ]] && rm -f "$CONF_DIR/fault.state" || return 1
+  fi
   [[ "$marked" == 1 ]] && sync -f "$CONF_DIR"
 }
 fail_closed() { quarantine "$*"; return 1; }
-release_quarantine() {
-  nft delete table inet vps_fw_lockdown || return 1
+# 已处于隔离时由审计/启动反复调用：只重新装载隔离表，不改写 locked.state，
+# 否则 5 秒后最初的隔离原因就会被覆盖，VNC 恢复时无从判断。
+reassert_quarantine() { with_guard reassert_quarantine_locked; }
+reassert_quarantine_locked() {
+  local reason
+  reason="$(head -n1 "$CONF_DIR/locked.state" 2>/dev/null || true)"
+  if ! lockdown_rules | nft -f -; then
+    err "严重故障：无法装载隔离规则！请通过 VNC 停止业务并检查内核/nft。"
+    return 1
+  fi
+  err "隔离状态持续中；请通过 VNC 恢复。最初原因: ${reason:-未记录（systemd 应急隔离）}"
+  return 1
+}
+release_quarantine() { with_guard release_quarantine_locked; }
+release_quarantine_locked() {
+  # Even if a full/read-only filesystem prevents fault.state, a failed or running
+  # independent guard must never be cleared by an overlapping restore.
+  local guard_state
+  guard_state="$(systemctl show -p ActiveState --value "$GUARD_UNIT")" || return 1
+  [[ "$guard_state" == inactive ]] || { err "独立隔离服务尚未结束或已失败，拒绝解除隔离"; return 1; }
+  [[ ! -e "$CONF_DIR/fault.state" ]] || { err "本次事务中发生独立守护故障，拒绝解除隔离；请从 VNC 重新核对并恢复。"; return 1; }
+  # 先建后删：隔离表本就不存在时（如人工执行 boot-restore）也算成功，仅 nft 真正故障才失败
+  printf 'table inet vps_fw_lockdown\ndelete table inet vps_fw_lockdown\n' | nft -f - || return 1
   rm -f "$CONF_DIR/locked.state" && sync -f "$CONF_DIR" || return 1
+}
+# 是否曾经初始化/启用过保护。未初始化的主机上，人工执行 audit/health/restore 不应触发隔离。
+is_initialized() {
+  # 启动服务单元存在即视为启用过保护：此后即使配置被整体删除，审计仍会直接隔离
+  [[ -L "$CONF_DIR/current" || -f "$CONF_DIR/fw.conf" || -f "$CONF_DIR/locked.state" || -f "$CONF_DIR/fault.state" || -e /etc/systemd/system/vps-fw.service ]]
+}
+confirm_cli_lockdown() {
+  # 交互终端下要求显式确认（与面板一致）；脚本/管道调用或 --yes 直接执行
+  [[ "${1:-}" == "--yes" || "${1:-}" == "-y" ]] && return 0
+  [[ -t 0 ]] || return 0
+  printf '  %s警告: 将隔离所有非回环流量，包括当前 SSH，只能通过 VNC 恢复。输入 YES 确认: %s' "$C_RED" "$C_RESET"
+  local ack=""
+  read -r ack || return 1
+  [[ "$ack" == "YES" ]] || { info "已取消"; return 1; }
 }
 valid_generation() {
   local gen="${1:-}" f
@@ -2087,25 +2294,34 @@ install_live_nft() {
   printf '%s\n' "$h" | atomic_write "$(fprint_file "$CONF_DIR")" || { fail_closed "指纹持久化失败"; return 1; }
 }
 explicit_restore() {
-  [[ ! -f "$(pend_file "$CONF_DIR")" ]] || { err "存在未确认配置；请重新应用已核对的草稿，而非直接恢复"; return 1; }
-  quarantine "人工恢复前隔离" || return 1
+  is_initialized || { err "VPS-FW 尚未初始化，未执行任何操作；请先运行 fw 完成向导"; return 1; }
+  [[ ! -f "$(pend_file "$CONF_DIR")" ]] || { err "存在未确认配置；请在面板 [6] 重新应用已核对的草稿，或执行 fw generations 后用 fw recover 版本ID 恢复，而非直接 restore"; return 1; }
+  quarantine "人工恢复前隔离" 1 || return 1
   install_live_nft || return 1
   release_quarantine || { fail_closed "解除隔离失败"; return 1; }
   ok "完整性校验通过，已恢复保存的策略"
 }
 list_generations() {
-  local gen
+  # 首列仍是版本 ID；按时间倒序并附创建时间。标记用 ASCII，VNC 文本控制台无法显示中文。
+  local gen id cur prev mark
   [[ -d "$CONF_DIR/generations" ]] || return 1
-  for gen in "$CONF_DIR"/generations/*; do
+  cur="$(readlink "$CONF_DIR/current" 2>/dev/null || true)"; cur="${cur##*/}"
+  prev="$(cat "$CONF_DIR/previous" 2>/dev/null || true)"; prev="${prev##*/}"
+  while IFS= read -r gen; do
+    gen="${gen%/}"
     [[ -d "$gen" && ! -L "$gen" ]] || continue
-    printf '%s\n' "${gen##*/}"
-  done
+    id="${gen##*/}"; mark=""
+    [[ -n "$prev" && "$id" == "$prev" ]] && mark="  <- previous"
+    [[ -n "$cur" && "$id" == "$cur" ]] && mark="  <- current"
+    printf '%s  %s%s\n' "$id" "$(date -r "$gen" '+%F %T' 2>/dev/null || printf '?')" "$mark"
+  done < <(ls -1dt "$CONF_DIR"/generations/*/ 2>/dev/null)
 }
 cmd_recover() {
   local version="$1" gen temp rc
   [[ "$version" =~ ^[0-9a-f]{24}$ ]] || { err "版本 ID 无效"; return 1; }
   gen="$CONF_DIR/generations/$version"
-  valid_generation "$gen" || { fail_closed "所选历史版本不完整，拒绝恢复"; return 1; }
+  # 选错/输错版本只报错，不隔离：此时尚未改动任何状态
+  valid_generation "$gen" || { err "所选历史版本不存在或校验失败，未做任何更改；可用 fw generations 查看版本 ID"; return 1; }
   temp="$(mktemp -d "${TMPDIR:-/tmp}/vps-fw-recover.XXXXXX")" || return 1
   if ! cp "$gen/fw.conf" "$temp/fw.conf" || ! cp "$gen/rules.db" "$temp/rules.db"; then
     rm -rf -- "$temp"; return 1
@@ -2116,8 +2332,12 @@ cmd_recover() {
   return "$rc"
 }
 boot_restore() {
-  if [[ -f "$CONF_DIR/locked.state" || -f "$(pend_file "$CONF_DIR")" ]]; then
-    fail_closed "上次存在隔离状态或未确认修改"; return 1
+  is_initialized || { err "VPS-FW 尚未初始化，未执行任何操作；请先运行 fw 完成向导"; return 1; }
+  if [[ -f "$CONF_DIR/locked.state" || -f "$CONF_DIR/fault.state" ]]; then
+    reassert_quarantine; return 1
+  fi
+  if [[ -f "$(pend_file "$CONF_DIR")" ]]; then
+    fail_closed "重启时存在未确认修改"; return 1
   fi
   # ExecStartPre has already installed independent lockdown rules.
   install_live_nft || return 1
@@ -2143,7 +2363,7 @@ do_rollback_unsafe() { fail_closed "已取消自动放宽式回滚；请使用 V
 cmd_confirm() {
   local gen h expected
   [[ -f "$(pend_file "$CONF_DIR")" ]] || { err "没有待确认修改"; return 1; }
-  [[ ! -f "$CONF_DIR/locked.state" ]] || { err "已隔离，必须从 VNC 重新应用规则"; return 1; }
+  [[ ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" ]] || { err "已隔离，必须从 VNC 重新应用规则"; return 1; }
   pending_expired && { fail_closed "确认已超时"; return 1; }
   systemctl is-active --quiet vps-fw-watch.timer && systemctl is-enabled --quiet vps-fw.service || { fail_closed "确认时启动保护或审计计时器不可用"; return 1; }
   gen="$(active_dir)" && valid_generation "$gen" || { fail_closed "确认时版本校验失败"; return 1; }
@@ -2163,7 +2383,11 @@ pending_expired() {
 }
 cmd_audit() {
   local gen h expected
-  [[ ! -f "$CONF_DIR/locked.state" ]] || { fail_closed "隔离状态持续中"; return 1; }
+  # 定时审计遇到此情况仍会失败，由 vps-fw-watch 的 OnFailure 应急隔离兜底
+  is_initialized || { err "VPS-FW 尚未初始化，未执行任何操作；请先运行 fw 完成向导"; return 1; }
+  if [[ -f "$CONF_DIR/locked.state" || -f "$CONF_DIR/fault.state" ]]; then
+    reassert_quarantine; return 1
+  fi
   pending_expired && { fail_closed "未在期限内确认"; return 1; }
   gen="$(active_dir)" && valid_generation "$gen" || { fail_closed "审计发现保存版本损坏或缺失"; return 1; }
   h="$(live_table_hash || true)"; expected="$(cat "$(fprint_file "$CONF_DIR")" 2>/dev/null || true)"
@@ -2199,7 +2423,8 @@ OnFailure=vps-fw-quarantine.service
 [Service]
 Type=oneshot
 TimeoutStartSec=20s
-ExecStart=$EXEC_PATH audit
+SuccessExitStatus=75
+ExecStart=$EXEC_PATH watch
 EOF
   [[ $? == 0 ]] || return 1
   atomic_write /etc/systemd/system/vps-fw-watch.timer 644 <<'EOF'
@@ -2221,9 +2446,8 @@ DefaultDependencies=no
 After=local-fs.target
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft 'add table inet vps_fw_lockdown; delete table inet vps_fw_lockdown; add table inet vps_fw_lockdown; add chain inet vps_fw_lockdown lock_input { type filter hook input priority -310; policy drop; }; add rule inet vps_fw_lockdown lock_input iifname lo accept; add chain inet vps_fw_lockdown lock_output { type filter hook output priority -310; policy drop; }; add rule inet vps_fw_lockdown lock_output oifname lo accept; add chain inet vps_fw_lockdown lock_forward { type filter hook forward priority -310; policy drop; }'
-ExecStartPost=/usr/bin/mkdir -p /etc/vps-fw
-ExecStartPost=/usr/bin/touch /etc/vps-fw/locked.state
+ExecStart=/usr/bin/flock -w 5 /run/vps-fw-guard.lock /bin/sh -ec 'umask 077; mkdir -p /etc/vps-fw || :; touch /etc/vps-fw/fault.state || :; /usr/sbin/nft "add table inet vps_fw_lockdown; delete table inet vps_fw_lockdown; add table inet vps_fw_lockdown; add chain inet vps_fw_lockdown lock_input { type filter hook input priority -310; policy drop; }; add rule inet vps_fw_lockdown lock_input iifname lo accept; add chain inet vps_fw_lockdown lock_output { type filter hook output priority -310; policy drop; }; add rule inet vps_fw_lockdown lock_output oifname lo accept; add chain inet vps_fw_lockdown lock_forward { type filter hook forward priority -310; policy drop; }"; test -f /etc/vps-fw/locked.state || echo systemd-guard-failure > /etc/vps-fw/locked.state; sync -f /etc/vps-fw'
+TimeoutStartSec=20s
 EOF
   [[ $? == 0 ]] || return 1
   systemctl daemon-reload || return 1
@@ -2250,7 +2474,7 @@ EOF
   systemctl daemon-reload
 }
 health_check() {
-  [[ ! -f "$CONF_DIR/locked.state" && ! -f "$(pend_file "$CONF_DIR")" ]] || return 1
+  [[ ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" && ! -f "$(pend_file "$CONF_DIR")" ]] || return 1
   cmd_audit
 }
 apply_draft_to_system() {
@@ -2265,20 +2489,26 @@ apply_draft_to_system() {
   [[ "$token" =~ ^[0-9a-f]{24}$ ]] || return 1
   stage="$CONF_DIR/generations/$token"
   mkdir -m700 "$stage" || return 1
-  cp "$(conf_file "$DRAFT_DIR")" "$stage/fw.conf" && cp "$(rules_file "$DRAFT_DIR")" "$stage/rules.db" || return 1
-  render_nft_ruleset "$stage" "$stage/rules.nft" || return 1
-  ( cd "$stage" && sha256sum fw.conf rules.db rules.nft > manifest.sha256 ) || return 1
-  chmod 600 "$stage/"* && valid_generation "$stage" || return 1
+  # 此阶段失败尚未触碰线上状态：清掉半成品版本目录，避免历史列表里堆积无效版本
+  if ! { cp "$(conf_file "$DRAFT_DIR")" "$stage/fw.conf" && cp "$(rules_file "$DRAFT_DIR")" "$stage/rules.db" \
+      && render_nft_ruleset "$stage" "$stage/rules.nft" \
+      && ( cd "$stage" && sha256sum fw.conf rules.db rules.nft > manifest.sha256 ) \
+      && chmod 600 "$stage/"* && valid_generation "$stage"; }; then
+    rm -rf -- "$stage"
+    return 1
+  fi
   # From this point any failure leaves a persistent quarantine, never a deleted table.
-  quarantine "应用事务进行中" || return 1
+  quarantine "应用事务进行中" 1 || return 1
   write_systemd_units || { fail_closed "启动保护配置写入失败"; return 1; }
   stop_rollback_timer_if_any || return 1
   old="$(readlink "$CONF_DIR/current" 2>/dev/null || true)"
   [[ -z "$old" ]] || printf '%s\n' "$old" | atomic_write "$CONF_DIR/previous" || return 1
-  ln -s "generations/$token" "$CONF_DIR/.current-$token" && mv -Tf "$CONF_DIR/.current-$token" "$CONF_DIR/current" || return 1
+  # 试用应用先写待确认标记再切换 current：两步之间崩溃时，新版本不会被当作已确认版本恢复
   if [[ "$trial" == 1 ]]; then
     printf 'TOKEN=%s\nSTART_EPOCH=%s\nSECS=%s\n' "$token" "$(date +%s)" "$CFG_ROLLBACK_SECS" | atomic_write "$(pend_file "$CONF_DIR")" || return 1
-  else
+  fi
+  ln -s "generations/$token" "$CONF_DIR/.current-$token" && mv -Tf "$CONF_DIR/.current-$token" "$CONF_DIR/current" || return 1
+  if [[ "$trial" != 1 ]]; then
     rm -f "$(pend_file "$CONF_DIR")" || return 1
   fi
   sync -f "$CONF_DIR" || return 1
@@ -2296,7 +2526,7 @@ validate_ipv6_cidr() {
   addr="${value%%/*}"
   if [[ "$value" == */* ]]; then
     mask="${value#*/}"
-    [[ "$mask" =~ ^[0-9]{1,3}$ ]] && (( 10#$mask<=128 )) || return 1
+    [[ "$mask" =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( mask<=128 )) || return 1
   fi
   [[ "$addr" == *:* && "$addr" =~ ^[0-9a-fA-F:]+$ && "$addr" != *:::* ]] || return 1
   [[ "$addr" != :* || "$addr" == ::* ]] || return 1
@@ -2316,20 +2546,20 @@ validate_ipv6_cidr() {
   if (( compressed )); then (( count<8 )); else (( count==8 )); fi
 }
 validate_rule_database() {
-  local dir="$1" f rid enabled action direction scope proto ports cidr comment ids=, total=0 normalized
+  local dir="$1" f rid enabled action direction scope proto ports cidr comment ids=, total=0
   f="$(rules_file "$dir")"
   [[ -f "$f" ]] || { err "规则数据库缺失"; return 1; }
-  while IFS='|' read -r rid enabled action direction scope proto ports cidr comment; do
+  while IFS='|' read -r rid enabled action direction scope proto ports cidr comment || [[ -n "$rid" ]]; do
     [[ -n "$rid" && "$rid" != \#* ]] || continue
     [[ "$rid" =~ ^[1-9][0-9]{0,8}$ && "$ids" != *",$rid,"* ]] || return 1
-    ids+="$rid,"; total=$((total+1)); (( total<=256 )) || return 1
+    ids+="$rid,"; total=$((total+1)); (( total<=256 )) || { err "规则数量超过上限 256 条"; return 1; }
     [[ "$enabled" == 0 || "$enabled" == 1 ]] || return 1
     [[ "$action" == accept || "$action" == drop ]] || return 1
     [[ "$direction" == in || "$direction" == out ]] || return 1
     [[ "$scope" == host || "$scope" == docker || "$scope" == all ]] || return 1
     case "$proto" in tcp|udp|both) ;; any|icmp) [[ "$ports" == any ]] || return 1 ;; *) return 1 ;; esac
-    normalized="$(validate_ports "$ports")" && [[ "$normalized" == "$ports" ]] || return 1
-    normalized="$(validate_cidrs "$cidr")" && [[ "$normalized" == "$cidr" ]] || return 1
+    normalize_ports "$ports" && [[ "$NORM_OUT" == "$ports" ]] || return 1
+    normalize_cidrs "$cidr" && [[ "$NORM_OUT" == "$cidr" ]] || return 1
     [[ "$comment" != *'|'* ]] || return 1
   done < "$f"
 }
