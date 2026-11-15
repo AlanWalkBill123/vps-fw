@@ -4,43 +4,70 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 
 > **严格隔离模式：** 未确认超时或检测到配置损坏时会阻断非回环 IP 流量，包括已有 SSH。不会自动撤掉保护。首次部署和故障恢复请使用商家的 VNC 控制台。
 
-## 一键启动
+## 安装前准备
 
-在 Debian 13 的交互终端中运行。下面的安装器和主脚本固定到同一提交，安装器校验主脚本 SHA256 后再运行：
+- 使用 Debian 13 VPS，准备 root 权限和可访问 GitHub 的网络。
+- **先确认商家提供的 VNC 控制台能够登录**，包括账号和密码。隔离会切断 SSH，也会切断 VPS 内自行运行的 VNC 网络服务。
+- 确认 SSH 实际监听端口，并了解当前连接的公网出口 IP。动态 IP 或代理出口变化可能使 SSH 白名单失效。
+- 应用规则时网络可能短暂中断；请避开交易关键时段，并先在测试 VPS 上验证。
+
+## 首次安装并打开面板
+
+连接 VPS，在交互终端执行以下命令。命令会下载安装器，校验并安装主脚本，然后打开面板：
 
 ```bash
 curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/f106a54666ab9f0e0ad2fd7fd929c76bf4f7b86b/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/f106a54666ab9f0e0ad2fd7fd929c76bf4f7b86b/vps-fw.sh' '9be2a73f72b491ffbbc11110838559ab6f7261a1e380de7b8666b21573897d37'
 ```
 
-安装器自身在管道中未经预先校验，需要信任其来源。更严格的方式是先下载、审阅并独立核验安装器，再执行：
+已登录为 `root` 时可去掉 `sudo`。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
+
+安装器和主脚本地址固定到同一提交；安装器会核验主脚本的 SHA256。管道中首次下载的安装器自身没有预先校验，需要信任其来源。希望先审阅安装器时，可下载并独立核验后再执行：
 
 ```bash
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/f106a54666ab9f0e0ad2fd7fd929c76bf4f7b86b/install-vps-fw.sh' -o install-vps-fw.sh
+# 先审阅 install-vps-fw.sh，并通过可信渠道独立核验其 SHA256
 sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/f106a54666ab9f0e0ad2fd7fd929c76bf4f7b86b/vps-fw.sh' '9be2a73f72b491ffbbc11110838559ab6f7261a1e380de7b8666b21573897d37'
 ```
 
-也可下载仓库中的 `vps-fw.sh`，核验 [SHA256SUMS](SHA256SUMS) 后本地运行：
+安装后，**以后打开面板只需运行**：
 
 ```bash
-sudo bash vps-fw.sh
+sudo fw
 ```
 
-安装后使用 `sudo fw` 打开面板。不需要安装即可预览界面：
+如果已经是 `root`，运行 `fw` 即可。退出面板不会停止已经应用的防火墙。
 
-```bash
-bash vps-fw.sh --demo --no-tty
-```
+## 首次配置、应用和确认
 
-## 应用与恢复
+1. 按向导核对公网网卡和 SSH 端口；如选择 SSH 白名单，确认其中包含你当前连接所用的公网出口 IP。
+2. 应用规则后，保持原窗口和商家控制台可用，**新开一个 SSH 窗口**验证能否登录。仅有原连接正常不代表新连接一定可用。
+3. 在面板显示的倒计时内，进入菜单 `[6]` 按提示确认；也可以在新窗口执行：
 
-- 应用后用新连接验证访问，再在 300 秒内执行 `sudo fw confirm`。
-- 到期后下一次审计检查会隔离网络；审计约每 5 秒执行，不承诺精确到毫秒。
-- 待确认状态下重启也会隔离。已有连接不会成为隔离后的例外。
-- `sudo fw lockdown` 在交互终端要求输入 `YES`；`--yes` 或非交互调用直接执行隔离；`rollback` 和 `emergency-off` 是隔离命令的兼容别名。
-- 无待确认修改且保存版本完整时，可在 VNC 中执行 `sudo fw restore`。
-- 超时后通过 VNC 打开 `fw`，在菜单 `[6] -> [3]` 重新应用核对后的草稿，再确认。
-- 当前配置损坏时，用 `sudo fw generations` 列出版本，再执行 `sudo fw recover 版本ID`，成功后仍需确认。
+   ```bash
+   sudo fw confirm
+   ```
 
-完整的安装、迁移、业务绑定与救援步骤见 [操作说明](docs/operations.txt)。
+   已是 `root` 时运行 `fw confirm`。确认后检查面板，确保不再显示等待确认。
+4. 默认确认期限为 300 秒；到期或待确认时重启会隔离非回环网络，包括已有 SSH。需要通过商家控制台恢复，不会自动放开公网。
+
+应用过程中可能出现“应用事务进行中”的隔离提示；请结合后续是否显示应用成功、面板状态及倒计时判断，仍须验证新连接并确认。
+
+## 常用命令与恢复
+
+| 目的 | 命令 | 说明 |
+| --- | --- | --- |
+| 打开面板 | `sudo fw` | root 用户可直接输入 `fw` |
+| 确认待确认规则 | `sudo fw confirm` | 先用新 SSH 连接验证 |
+| 检查健康状态 | `sudo fw health` | 通过时输出 `PASS` |
+| 查看状态 | `sudo fw status` | 查看面板状态及规则 |
+| 查看历史版本 | `sudo fw generations` | 列出可用于恢复的版本 ID |
+| 恢复历史版本 | `sudo fw recover 版本ID` | 需在控制台核对；应用后仍需确认 |
+
+如已隔离，通过商家 VNC 登录：没有待确认修改且保存配置完整时可执行 `sudo fw restore`；超时后用 `sudo fw` 打开面板，核对草稿，在菜单 `[6]` 按提示重新应用并确认。配置损坏时参考[完整恢复步骤](docs/operations.txt)。
+
+`sudo fw lockdown` 会隔离所有非回环流量，交互终端需输入 `YES`；`--yes` 或非交互调用直接执行。`rollback` 和 `emergency-off` 也是隔离命令，**不会撤掉防护**。
+
+本地预览界面可下载仓库中的 `vps-fw.sh`、核验 [SHA256SUMS](SHA256SUMS) 后运行 `bash vps-fw.sh --demo --no-tty`；演示不会安装防火墙。
 
 ## 从 3.1.0 升级
 
