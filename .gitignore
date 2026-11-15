@@ -1,0 +1,23 @@
+# Local state and credentials
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+test_key*
+known_hosts
+# VM images, logs, temporary files and generated results
+work/
+outputs/
+*.qcow2
+*.img
+*.iso
+*.sock
+*.pid
+*.log
+*.zip
+__pycache__/
+*.pyc
+tests/*-results.json
