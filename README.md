@@ -9,13 +9,13 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 在 Debian 13 的交互终端中运行。下面的安装器和主脚本固定到同一提交，安装器校验主脚本 SHA256 后再运行：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/RELEASE_COMMIT/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/RELEASE_COMMIT/vps-fw.sh' '4f4cb5fd1db747530e21dc0a62449b66aecc4547210a0850ccab4f03b3549098'
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ebcf4ae1bae4043c3db0ce44f5b8b403340dea17/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ebcf4ae1bae4043c3db0ce44f5b8b403340dea17/vps-fw.sh' '4f4cb5fd1db747530e21dc0a62449b66aecc4547210a0850ccab4f03b3549098'
 ```
 
 安装器自身在管道中未经预先校验，需要信任其来源。更严格的方式是先下载、审阅并独立核验安装器，再执行：
 
 ```bash
-sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/RELEASE_COMMIT/vps-fw.sh' '4f4cb5fd1db747530e21dc0a62449b66aecc4547210a0850ccab4f03b3549098'
+sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ebcf4ae1bae4043c3db0ce44f5b8b403340dea17/vps-fw.sh' '4f4cb5fd1db747530e21dc0a62449b66aecc4547210a0850ccab4f03b3549098'
 ```
 
 也可下载仓库中的 `vps-fw.sh`，核验 [SHA256SUMS](SHA256SUMS) 后本地运行：
