@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.5"
+VERSION="3.1.6"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -1118,10 +1118,10 @@ render_dashboard() {
     elapsed=$(( $(date +%s) - start_ep ))
     rem=$(( ${secs_tot:-300} - elapsed ))
     (( rem < 0 )) && rem=0
-    printf '  %s[!] 已应用规则并等待确认（剩余 %s 秒将超时隔离） -> 请按 [6] 确认保存或执行 fw confirm%s\n' "$C_YELLOW$C_BOLD" "$rem" "$C_RESET"
+    printf '  %s[!] 规则已应用，等待确认（剩余 %s 秒，超时将隔离） → 验证连接后选 [6] → [1] 或执行 fw confirm%s\n' "$C_YELLOW$C_BOLD" "$rem" "$C_RESET"
   fi
   if (( CHANGES_PENDING == 1 )); then
-    printf '  %s[*] 检测到未应用的草稿改动 -> 请按 [6] 应用规则使其在内核生效%s\n' "$C_MAGENTA$C_BOLD" "$C_RESET"
+    printf '  %s[*] 草稿有未应用改动 → 请在 [6] 应用后生效%s\n' "$C_MAGENTA$C_BOLD" "$C_RESET"
   fi
 }
 
@@ -1336,11 +1336,11 @@ first_time_setup() {
   ok "已生成初始安全草稿（默认拦截所有其他公网入站及 Docker 端口映射）。"
   if (( DEMO_MODE == 0 )); then
     warn_if_no_console_login
-    if ask_yesno "是否现在立即应用基础防火墙保护（含 300 秒超时隔离保护）？" "y"; then
-      with_lock apply_draft_to_system 1 || { err "应用失败，未确认成功"; pause_prompt; return 1; }
+    if ask_yesno "现在应用初始草稿？（立即生效，300 秒内未确认则隔离）" "y"; then
+      with_lock apply_draft_to_system 1 || { err "规则应用失败，请检查错误提示及当前防护状态"; pause_prompt; return 1; }
       # with_lock 在子 shell 中执行，草稿状态需在此处同步
       CHANGES_PENDING=0
-      ok "基础防护已上线！请新开 SSH 窗口验证可正常登录后，在主菜单 [6] 确认保存。"
+      ok "规则已应用，等待确认。请在 300 秒内新开 SSH 连接验证，再选 [6] → [1] 确认保存。"
       pause_prompt
     fi
   fi
@@ -1519,7 +1519,7 @@ action_manage_rules() {
       awk -F'|' -v OFS='|' -v id="$rid" '{if($1==id){$2=($2=="1"?"0":"1")} print}' "$rf" > "$tmp" || { rm -f "$tmp"; return 1; }
       mv -f "$tmp" "$rf" || return 1
       check_draft_dirty
-      ok "已切换规则 #$rid 状态"
+      ok "已修改草稿中规则 #$rid 的状态，请在 [6] 应用后生效"
       ;;
     2)
       printf '  输入要删除的规则 ID (多个用逗号隔开): '
@@ -1581,14 +1581,14 @@ action_manage_rules() {
         lines[found_idx]="$swap"
         printf '%s\n' "${lines[@]}" | atomic_write "$rf" || return 1
         check_draft_dirty
-        ok "规则 #$rid 已上移"
+        ok "草稿中规则 #$rid 已上移，请在 [6] 应用后生效"
       elif [[ "$dir_mv" == "d" ]] && (( found_idx >= 0 && found_idx < ${#lines[@]} - 1 )); then
         local swap="${lines[found_idx+1]}"
         lines[found_idx+1]="${lines[found_idx]}"
         lines[found_idx]="$swap"
         printf '%s\n' "${lines[@]}" | atomic_write "$rf" || return 1
         check_draft_dirty
-        ok "规则 #$rid 已下移"
+        ok "草稿中规则 #$rid 已下移，请在 [6] 应用后生效"
       else
         warn "已在边界位置或输入无效"
       fi
@@ -1636,7 +1636,7 @@ action_presets_menu() {
       CFG_SSH_SOURCES="$wip"
       save_conf "$DRAFT_DIR" || return 1
       check_draft_dirty
-      ok "公网 SSH 专用策略已更新：仅允许 ${wip}；覆盖普通规则中的 SSH 放行，不修改 Docker 规则。"
+      ok "草稿中的 SSH 白名单：${wip}，请在 [6] 应用后生效；普通规则仍受此来源限制。"
       ;;
     2)
       printf '  输入内网 VPN 网卡名 (如 tailscale0 或 wg0 或 wt0): '
@@ -1654,7 +1654,7 @@ action_presets_menu() {
         CFG_SSH_SOURCES=""
         save_conf "$DRAFT_DIR" || return 1
         check_draft_dirty
-        ok "已更新公网 SSH 专用策略，普通放行规则不能绕过；请应用后新建连接验证。"
+        ok "已修改草稿中的 SSH 专用策略，请在 [6] 应用后验证新连接。"
       fi
       ;;
     3)
@@ -1666,7 +1666,7 @@ action_presets_menu() {
       CFG_PING_ALLOW="$( [[ "$CFG_PING_ALLOW" == "1" ]] && printf '0' || printf '1' )"
       save_conf "$DRAFT_DIR" || { err "草稿配置写入失败"; return 1; }
       check_draft_dirty
-      ok "已切换公网 Ping 状态"
+      ok "已修改草稿中的公网 Ping 状态，请在 [6] 应用后生效"
       ;;
     5)
       printf '  当前信任内网网卡: %s\n' "${CFG_TRUSTED_IFS:-无}"
@@ -1687,13 +1687,13 @@ action_presets_menu() {
       CFG_TRUSTED_IFS="$new_t"
       save_conf "$DRAFT_DIR" || { err "草稿配置写入失败"; return 1; }
       check_draft_dirty
-      ok "信任内网网卡已更新为: ${CFG_TRUSTED_IFS:-无}"
+      ok "草稿中的信任接口：${CFG_TRUSTED_IFS:-无}，请在 [6] 应用后生效"
       ;;
     6)
       CFG_DOCKER_TO_HOST="$( [[ "$CFG_DOCKER_TO_HOST" == "drop" ]] && printf 'accept' || printf 'drop' )"
       save_conf "$DRAFT_DIR" || { err "草稿配置写入失败"; return 1; }
       check_draft_dirty
-      ok "容器反连宿主机策略已切换为: $CFG_DOCKER_TO_HOST"
+      ok "草稿中的容器访问宿主机策略：$CFG_DOCKER_TO_HOST，请在 [6] 应用后生效"
       ;;
     7)
       if [[ "$CFG_OUTBOUND_POLICY" == "accept" ]]; then
@@ -1709,7 +1709,7 @@ action_presets_menu() {
       fi
       save_conf "$DRAFT_DIR" || { err "草稿配置写入失败"; return 1; }
       check_draft_dirty
-      ok "默认出站策略已切换为: $CFG_OUTBOUND_POLICY"
+      ok "草稿中的默认出站策略：$CFG_OUTBOUND_POLICY，请在 [6] 应用后生效"
       ;;
     8)
       local dwan
@@ -1724,7 +1724,7 @@ action_presets_menu() {
       CFG_WAN_IF="$nw"
       save_conf "$DRAFT_DIR" || { err "草稿配置写入失败"; return 1; }
       check_draft_dirty
-      ok "公网网卡已设置为: $CFG_WAN_IF"
+      ok "草稿中的公网网卡：$CFG_WAN_IF，请在 [6] 应用后生效"
       ;;
     11)
       warn "仅此处设置的地址优先拒绝 SSH；普通规则不自动重排。包含自己的地址将阻断登录。"
@@ -1734,7 +1734,7 @@ action_presets_menu() {
       if [[ -n "$blocked" ]]; then
         blocked="$(validate_cidrs "$blocked")" && [[ "$blocked" != any ]] || { err "请指定地址"; return 1; }
       fi
-      if ask_yesno "确认保存 SSH 黑名单？" n; then
+      if ask_yesno "确认将 SSH 黑名单写入草稿？" n; then
         CFG_SSH_BLOCK="$blocked"; save_conf "$DRAFT_DIR" || return 1; check_draft_dirty
       fi
       ;;
@@ -1813,11 +1813,11 @@ action_docker_audit() {
 }
 
 action_apply_confirm_menu() {
-  printf '\n%s── [6] 应用规则 / 确认保存 / 隔离 ───────────────────────────────────────────%s\n' "$C_CYAN" "$C_RESET"
+  printf '\n%s── [6] 规则应用与确认 ───────────────────────────────────────────%s\n' "$C_CYAN" "$C_RESET"
   if [[ -f "$(pend_file "$CONF_DIR")" ]]; then
-    printf '  [1] 确认保存当前已生效的新规则 (取消 300 秒超时隔离)\n'
-    printf '  [2] 立即隔离网络\n'
-    printf '  [3] 重新应用当前草稿（新一轮待确认，用于 VNC 恢复）\n'
+    printf '  当前阶段：规则已应用，等待确认（隔离状态下需先恢复）\n  [1] 确认保存（验证连接后操作，取消超时隔离）\n'
+    printf '  [2] 立即隔离（中断网络连接，包括 SSH）\n'
+    printf '  [3] 重新应用（重新开始确认倒计时，用于 VNC 恢复）\n'
     printf '  [0] 返回\n'
     printf '  请选择: '
     local c=""
@@ -1835,10 +1835,10 @@ action_apply_confirm_menu() {
 
   local ssh_port
   ssh_port="$(detect_ssh_port)"
-  printf '  当前 SSH 端口检测为: %s/TCP。请确保已在规则列表中放行或已配置信任内网网卡！\n' "$ssh_port"
-  printf '  [1] 安全应用 (推荐: 开启 300 秒失败封闭倒计时，未确认自动隔离)\n'
-  printf '  [2] 直接永久应用 (立即生效并设为永久，不设倒计时)\n'
-  printf '  [0] 取消返回\n'
+  printf '  当前阶段：选择草稿应用方式\n  探测 SSH 端口：%s/TCP。应用前请核对 SSH 放行规则或信任接口。\n' "$ssh_port"
+  printf '  [1] 应用后确认（推荐：立即生效，300 秒内未确认则隔离）\n'
+  printf '  [2] 应用并保存（立即生效，跳过确认倒计时）\n'
+  printf '  [0] 返回\n'
   printf '  请选择: '
   local c=""
   read -r c || return
@@ -1847,17 +1847,17 @@ action_apply_confirm_menu() {
       confirm_ssh_lockout_risk || return
       if with_lock apply_draft_to_system 1; then
         CHANGES_PENDING=0
-        ok "新防火墙规则已生效！请在 300 秒内新开 SSH 窗口验证可正常登录后，选 [6] -> [1] 确认保存。"
+        ok "规则已应用，等待确认。请在 300 秒内新开 SSH 连接验证，再选 [6] → [1] 确认保存。"
       else
-        err "应用失败，未确认成功"
+        err "规则应用失败，请检查错误提示及当前防护状态"
       fi
       ;;
     2)
       confirm_ssh_lockout_risk || return
-      if ask_yesno "确定不设确认倒计时、直接永久应用吗？" "n"; then
+      if ask_yesno "确认应用并保存，跳过确认倒计时？" "n"; then
         if with_lock apply_draft_to_system 0; then
           CHANGES_PENDING=0
-          ok "新防火墙规则已永久生效！"
+          ok "规则已应用并保存，无需再次确认。"
         else
           err "应用失败"
         fi
@@ -2007,7 +2007,7 @@ check_and_install_update() (
   [[ "$DEMO_MODE" != 1 ]] || { info "演示模式不联网、不安装更新"; return 0; }
   check_draft_dirty
   (( CHANGES_PENDING == 0 )) || { warn "有未应用草稿，请先应用并确认，或退出放弃草稿后再检查更新"; return 1; }
-  [[ ! -f "$(pend_file "$CONF_DIR")" ]] || { warn "有待确认配置，请先验证连接并确认，再更新脚本"; return 1; }
+  [[ ! -f "$(pend_file "$CONF_DIR")" ]] || { warn "有等待确认的规则，请先验证连接并确认保存，再更新脚本"; return 1; }
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/vps-fw-update.XXXXXX")" || return 1
   # Freeze the quoted path now: function locals disappear before the subshell EXIT trap.
   # shellcheck disable=SC2064
@@ -2062,7 +2062,7 @@ interactive_loop() {
     render_rules_table "$DRAFT_DIR"
     echo
     printf '  %s[1]%s 快速放行端口 (入站允许)            %s[5]%s Docker 容器端口暴露审计\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
-    printf '  %s[2]%s 添加高级规则 (白名单/封禁IP/出站)  %s[6]%s 应用规则 / 确认 / 隔离\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
+    printf '  %s[2]%s 添加高级规则 (白名单/封禁IP/出站)  %s[6]%s 规则应用与确认\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
     printf '  %s[3]%s 编辑 / 启停 / 删除 / 排序规则      %s[7]%s 查看底层 nft 规则 & 端口诊断\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
     printf '  %s[4]%s 自动交易 / 常用安全预设            %s[8]%s 版本恢复 / 紧急隔离\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
     printf '  %s[9]%s 检查脚本更新\n' "$C_CYAN" "$C_RESET"
@@ -2223,7 +2223,7 @@ VPS-FW v${VERSION} -- Debian / Ubuntu 主机防火墙面板
   fw status               只读查看当前防护状态与规则列表
   fw rules                查看内核实际加载的 nftables 规则
   fw docker-audit         列出 Docker 映射和有来源条件的候选规则（需外部验证）
-  fw confirm              确认最新修改 (取消 300 秒超时隔离)
+  fw confirm              确认已应用的规则（取消超时隔离）
   fw rollback             旧命令别名：立即隔离网络（不会撤掉保护；终端下需输入 YES）
   fw audit                校验保存版本与内核；异常则隔离并返回失败（未初始化时不做任何操作）
   fw restore              VNC 中人工恢复完整版本（无待确认修改时）
@@ -2536,7 +2536,7 @@ cmd_auto_rollback() {
 do_rollback_unsafe() { fail_closed "已取消自动放宽式回滚；请使用 VNC 重新应用规则"; }
 cmd_confirm() {
   local gen h expected
-  [[ -f "$(pend_file "$CONF_DIR")" ]] || { err "没有待确认修改"; return 1; }
+  [[ -f "$(pend_file "$CONF_DIR")" ]] || { err "没有等待确认的规则"; return 1; }
   [[ ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" ]] || { err "已隔离，必须从 VNC 重新应用规则"; return 1; }
   pending_expired && { fail_closed "确认已超时"; return 1; }
   systemctl is-active --quiet vps-fw-watch.timer && systemctl is-enabled --quiet vps-fw.service || { fail_closed "确认时启动保护或审计计时器不可用"; return 1; }
@@ -2545,7 +2545,7 @@ cmd_confirm() {
   [[ -n "$h" && "$h" == "$expected" ]] || { fail_closed "确认时内核规则不一致"; return 1; }
   stop_rollback_timer_if_any && rm -f "$(pend_file "$CONF_DIR")" || { fail_closed "确认状态写入失败"; return 1; }
   sync -f "$CONF_DIR" || { fail_closed "确认状态落盘失败"; return 1; }
-  ok "已确认当前完整版本，启动时将验证后恢复"
+  ok "规则已确认保存，超时隔离已取消；重启时校验通过后恢复。"
 }
 pending_expired() {
   local start secs
@@ -2690,7 +2690,7 @@ apply_draft_to_system() {
   systemctl enable --now vps-fw-watch.timer && systemctl is-active --quiet vps-fw-watch.timer || { fail_closed "审计定时器未启动"; return 1; }
   release_quarantine || { fail_closed "解除隔离失败"; return 1; }
   CHANGES_PENDING=0
-  ok "规则已应用；未确认到期或异常时将隔离，不会自动开放公网"
+  ok "规则已应用；请按后续提示完成操作。发生异常时将隔离网络。"
 }
 cmd_emergency_off() { quarantine "用户请求隔离"; }
 cmd_uninstall() { err "严格模式不自动卸载保护。请在 VNC 中按文档执行人工退役流程。"; return 1; }
