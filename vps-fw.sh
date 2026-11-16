@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.7"
+VERSION="3.1.8"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -1118,7 +1118,7 @@ render_dashboard() {
     elapsed=$(( $(date +%s) - start_ep ))
     rem=$(( ${secs_tot:-300} - elapsed ))
     (( rem < 0 )) && rem=0
-    printf '  %s[!] 规则已应用，等待确认（剩余 %s 秒，超时将隔离） → 验证连接后选 [6] → [1] 或执行 fw confirm%s\n' "$C_YELLOW$C_BOLD" "$rem" "$C_RESET"
+    printf '  %s[!] 规则已应用，等待确认（剩余 %s 秒，超时恢复已确认配置，无可用版本则隔离） → 验证连接后选 [6] → [1] 或执行 fw confirm%s\n' "$C_YELLOW$C_BOLD" "$rem" "$C_RESET"
   fi
   if (( CHANGES_PENDING == 1 )); then
     printf '  %s[*] 草稿有未应用改动 → 请在 [6] 应用后生效%s\n' "$C_MAGENTA$C_BOLD" "$C_RESET"
@@ -1336,7 +1336,7 @@ first_time_setup() {
   ok "已生成初始安全草稿（默认拦截所有其他公网入站及 Docker 端口映射）。"
   if (( DEMO_MODE == 0 )); then
     warn_if_no_console_login
-    if ask_yesno "现在应用初始草稿？（立即生效，300 秒内未确认则隔离）" "y"; then
+    if ask_yesno "现在应用初始草稿？（立即生效，300 秒内未确认则恢复旧配置，无可用版本则隔离）" "y"; then
       with_lock apply_draft_to_system 1 || { err "规则应用失败，请检查错误提示及当前防护状态"; pause_prompt; return 1; }
       # with_lock 在子 shell 中执行，草稿状态需在此处同步
       CHANGES_PENDING=0
@@ -1815,7 +1815,7 @@ action_docker_audit() {
 action_apply_confirm_menu() {
   printf '\n%s── [6] 规则应用与确认 ───────────────────────────────────────────%s\n' "$C_CYAN" "$C_RESET"
   if [[ -f "$(pend_file "$CONF_DIR")" ]]; then
-    printf '  当前阶段：规则已应用，等待确认（隔离状态下需先恢复）\n  [1] 确认保存（验证连接后操作，取消超时隔离）\n'
+    printf '  当前阶段：规则已应用，等待确认（隔离状态下需先恢复）\n  [1] 确认保存（验证连接后操作，取消超时恢复）\n'
     printf '  [2] 立即隔离（中断网络连接，包括 SSH）\n'
     printf '  [3] 重新应用（重新开始确认倒计时，用于 VNC 恢复）\n'
     printf '  [0] 返回\n'
@@ -1836,7 +1836,7 @@ action_apply_confirm_menu() {
   local ssh_port
   ssh_port="$(detect_ssh_port)"
   printf '  当前阶段：选择草稿应用方式\n  探测 SSH 端口：%s/TCP。应用前请核对 SSH 放行规则或信任接口。\n' "$ssh_port"
-  printf '  [1] 应用后确认（推荐：立即生效，300 秒内未确认则隔离）\n'
+  printf '  [1] 应用后确认（推荐：立即生效，300 秒内未确认则恢复旧配置，无可用版本则隔离）\n'
   printf '  [2] 应用并保存（立即生效，跳过确认倒计时）\n'
   printf '  [0] 返回\n'
   printf '  请选择: '
@@ -2263,7 +2263,7 @@ VPS-FW v${VERSION} -- Debian / Ubuntu 主机防火墙面板
   fw status               只读查看当前防护状态与规则列表
   fw rules                查看内核实际加载的 nftables 规则
   fw docker-audit         列出 Docker 映射和有来源条件的候选规则（需外部验证）
-  fw confirm              确认已应用的规则（取消超时隔离）
+  fw confirm              确认已应用的规则（取消超时恢复）
   fw rollback             旧命令别名：立即隔离网络（不会撤掉保护；终端下需输入 YES）
   fw audit                校验保存版本与内核；异常则隔离并返回失败（未初始化时不做任何操作）
   fw restore              VNC 中人工恢复完整版本（无待确认修改时）
@@ -2565,27 +2565,50 @@ stop_rollback_timer_if_any() {
     systemctl stop "$unit.timer" || return 1
   fi
 }
+# 仅记录明确确认过的版本；previous 可能是未确认版本，不能用作自动恢复目标。
+remember_confirmed() {
+  local target
+  target="$(readlink "$CONF_DIR/current")" || return 1
+  [[ "$target" =~ ^generations/[0-9a-f]{24}$ ]] || return 1
+  printf '%s\n' "$target" | atomic_write "$CONF_DIR/confirmed" && sync -f "$CONF_DIR"
+}
+rollback_expired_trial() {
+  local target start secs now
+  # 损坏的计时信息、时钟倒退及已有故障仍按异常隔离，不能自动恢复。
+  start="$(awk -F= '/^START_EPOCH=/{print $2}' "$(pend_file "$CONF_DIR")")"
+  secs="$(awk -F= '/^SECS=/{print $2}' "$(pend_file "$CONF_DIR")")"
+  now="$(date +%s)"
+  [[ "$start" =~ ^[1-9][0-9]{0,11}$ && "$secs" =~ ^[1-9][0-9]{0,3}$ ]] && (( now >= start + secs )) || { fail_closed "待确认计时异常"; return 1; }
+  [[ ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" ]] || { reassert_quarantine; return 1; }
+  target="$(cat "$CONF_DIR/confirmed" 2>/dev/null)" || { fail_closed "确认超时，尚无已确认版本可恢复"; return 1; }
+  [[ "$target" =~ ^generations/[0-9a-f]{24}$ ]] && ( valid_generation "$CONF_DIR/$target" ) || { fail_closed "确认超时，已确认版本校验失败"; return 1; }
+  # 保留 pending 至装载成功；中途失败或重启仍由隔离机制兜底。
+  ln -s "$target" "$CONF_DIR/.timeout-current" && mv -Tf "$CONF_DIR/.timeout-current" "$CONF_DIR/current" || { fail_closed "超时恢复版本切换失败"; return 1; }
+  sync -f "$CONF_DIR" && install_live_nft || { fail_closed "超时恢复规则失败"; return 1; }
+  stop_rollback_timer_if_any && rm -f "$(pend_file "$CONF_DIR")" && sync -f "$CONF_DIR" || { fail_closed "超时恢复状态保存失败"; return 1; }
+  ok "确认已超时，已恢复上一次确认的完整配置。"
+}
 cmd_auto_rollback() {
   # Legacy scheduled callback must fail closed too.
   local token="${1:-}" force="${2:-0}" cur
   [[ -f "$(pend_file "$CONF_DIR")" ]] || return 0
   cur="$(awk -F= '/^TOKEN=/{print $2}' "$(pend_file "$CONF_DIR")")"
   [[ "$force" == 1 || "$token" == "$cur" ]] || return 0
-  fail_closed "未确认修改到期（旧版回调）"
+  cmd_audit
 }
 do_rollback_unsafe() { fail_closed "已取消自动放宽式回滚；请使用 VNC 重新应用规则"; }
 cmd_confirm() {
   local gen h expected
   [[ -f "$(pend_file "$CONF_DIR")" ]] || { err "没有等待确认的规则"; return 1; }
   [[ ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" ]] || { err "已隔离，必须从 VNC 重新应用规则"; return 1; }
-  pending_expired && { fail_closed "确认已超时"; return 1; }
+  pending_expired && { cmd_audit; return 1; }
   systemctl is-active --quiet vps-fw-watch.timer && systemctl is-enabled --quiet vps-fw.service || { fail_closed "确认时启动保护或审计计时器不可用"; return 1; }
   gen="$(active_dir)" && valid_generation "$gen" || { fail_closed "确认时版本校验失败"; return 1; }
   h="$(live_table_hash)"; expected="$(cat "$(fprint_file "$CONF_DIR")" 2>/dev/null)"
   [[ -n "$h" && "$h" == "$expected" ]] || { fail_closed "确认时内核规则不一致"; return 1; }
-  stop_rollback_timer_if_any && rm -f "$(pend_file "$CONF_DIR")" || { fail_closed "确认状态写入失败"; return 1; }
+  remember_confirmed && stop_rollback_timer_if_any && rm -f "$(pend_file "$CONF_DIR")" || { fail_closed "确认状态写入失败"; return 1; }
   sync -f "$CONF_DIR" || { fail_closed "确认状态落盘失败"; return 1; }
-  ok "规则已确认保存，超时隔离已取消；重启时校验通过后恢复。"
+  ok "规则已确认保存，超时恢复已取消；重启时校验通过后恢复。"
 }
 pending_expired() {
   local start secs
@@ -2602,10 +2625,10 @@ cmd_audit() {
   if [[ -f "$CONF_DIR/locked.state" || -f "$CONF_DIR/fault.state" ]]; then
     reassert_quarantine; return 1
   fi
-  pending_expired && { fail_closed "未在期限内确认"; return 1; }
   gen="$(active_dir)" && valid_generation "$gen" || { fail_closed "审计发现保存版本损坏或缺失"; return 1; }
   h="$(live_table_hash || true)"; expected="$(cat "$(fprint_file "$CONF_DIR")" 2>/dev/null || true)"
   [[ -n "$h" && "$h" == "$expected" ]] || { fail_closed "审计发现内核规则缺失或变化"; return 1; }
+  if pending_expired; then rollback_expired_trial; return $?; fi
   printf 'PASS\n'
 }
 write_systemd_units() {
@@ -2711,6 +2734,13 @@ apply_draft_to_system() {
     rm -rf -- "$stage"
     return 1
   fi
+  # 升级后的首次应用：将健康且无待确认标记的当前版本记为已确认基线。
+  # 重复应用待确认草稿时不得覆盖该基线。
+  if [[ -L "$CONF_DIR/current" && ! -f "$(pend_file "$CONF_DIR")" && ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" ]]; then
+    if ! ( cmd_audit >/dev/null && remember_confirmed ); then
+      rm -rf -- "$stage"; return 1
+    fi
+  fi
   # From this point any failure leaves a persistent quarantine, never a deleted table.
   quarantine "应用事务进行中" 1 || return 1
   write_systemd_units || { fail_closed "启动保护配置写入失败"; return 1; }
@@ -2728,6 +2758,9 @@ apply_draft_to_system() {
   sync -f "$CONF_DIR" || return 1
   install_live_nft || return 1
   systemctl enable --now vps-fw-watch.timer && systemctl is-active --quiet vps-fw-watch.timer || { fail_closed "审计定时器未启动"; return 1; }
+  if [[ "$trial" != 1 ]]; then
+    remember_confirmed || { fail_closed "已确认版本记录失败"; return 1; }
+  fi
   release_quarantine || { fail_closed "解除隔离失败"; return 1; }
   CHANGES_PENDING=0
   ok "规则已应用；请按后续提示完成操作。发生异常时将隔离网络。"
