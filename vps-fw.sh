@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.6"
+VERSION="3.1.7"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -2040,7 +2040,36 @@ action_script_update() {
   return "$rc"
 }
 
+# 等待确认时，每次空闲 5 秒返回菜单重绘；REPLY 保留尚未提交的输入。
+read_menu_choice() {
+  local ch="" rc=0 started=0
+  while true; do
+    ch=""; rc=0; started=$SECONDS
+    IFS= read -r -s -n 1 -t 5 ch || rc=$?
+    if (( rc != 0 )); then
+      # Bash 3 的 read 超时返回 1；统一为超时状态，保留真正 EOF。
+      if (( rc == 1 && SECONDS - started >= 5 )); then return 142; fi
+      return "$rc"
+    fi
+    case "$ch" in
+      "") printf '\n'; return 0 ;;
+      $'\004') [[ -n "$REPLY" ]] && return 0; return 1 ;;
+      $'\177'|$'\b')
+        if [[ -n "$REPLY" ]]; then
+          REPLY="${REPLY%?}"
+          printf '\b \b'
+        fi ;;
+      $'\025')
+        while [[ -n "$REPLY" ]]; do REPLY="${REPLY%?}"; printf '\b \b'; done ;;
+      [a-zA-Z0-9]|' ')
+        REPLY+="$ch"
+        printf '%s' "$ch" ;;
+    esac
+  done
+}
+
 interactive_loop() {
+  local REPLY="" menu_read_rc=0
   if [[ ! -f "$(conf_file "$CONF_DIR")" ]]; then
     init_draft_from_conf || return 1
     first_time_setup || return 1
@@ -2069,7 +2098,18 @@ interactive_loop() {
     printf '  %s[0]%s 退出面板 (已应用的防火墙持续在后台守护)\n' "$C_DIM" "$C_RESET"
     printf '\n  请输入操作编号: '
     local choice=""
-    if ! read -r choice; then
+    if [[ -t 0 && -t 1 ]] && { [[ -f "$(pend_file "$CONF_DIR")" ]] || [[ -n "$REPLY" ]]; }; then
+      printf '%s' "$REPLY"
+      menu_read_rc=0
+      read_menu_choice || menu_read_rc=$?
+      if (( menu_read_rc > 128 )); then
+        continue
+      elif (( menu_read_rc != 0 )); then
+        echo
+        break
+      fi
+      choice="$REPLY"; REPLY=""
+    elif ! read -r choice; then
       echo
       break
     fi
