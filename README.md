@@ -1,6 +1,6 @@
 # VPS-FW
 
-Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.2**。
+Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.3**。
 
 > **严格隔离模式：** 未确认超时或检测到配置损坏时会阻断非回环 IP 流量，包括已有 SSH。不会自动撤掉保护。首次部署和故障恢复请使用商家的 VNC 控制台。
 
@@ -16,7 +16,7 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 连接 VPS，在交互终端执行以下命令。命令会下载安装器，校验并安装主脚本，然后打开面板：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/8c2252b151d42035f927bc843c05c896f209150e/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/8c2252b151d42035f927bc843c05c896f209150e/vps-fw.sh' '12b2ea24498481d6ea3a0601ef9e45e1f149187becd78a010c098d601a75fc32'
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/vps-fw.sh' 'f1148b30041cba3513c5890a99b918affe65209a8f042cfdd3fc808f8ae82db5'
 ```
 
 已登录为 `root` 时可去掉 `sudo`。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
@@ -24,9 +24,9 @@ curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/8c2252b151d
 安装器和主脚本地址固定到同一提交；安装器会核验主脚本的 SHA256。管道中首次下载的安装器自身没有预先校验，需要信任其来源。希望先审阅安装器时，可下载并独立核验后再执行：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/8c2252b151d42035f927bc843c05c896f209150e/install-vps-fw.sh' -o install-vps-fw.sh
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/install-vps-fw.sh' -o install-vps-fw.sh
 # 先审阅 install-vps-fw.sh，并通过可信渠道独立核验其 SHA256
-sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/8c2252b151d42035f927bc843c05c896f209150e/vps-fw.sh' '12b2ea24498481d6ea3a0601ef9e45e1f149187becd78a010c098d601a75fc32'
+sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/vps-fw.sh' 'f1148b30041cba3513c5890a99b918affe65209a8f042cfdd3fc808f8ae82db5'
 ```
 
 安装后，**以后打开面板只需运行**：
@@ -69,6 +69,18 @@ sudo fw
 
 本地预览界面可下载仓库中的 `vps-fw.sh`、核验 [SHA256SUMS](SHA256SUMS) 后运行 `bash vps-fw.sh --demo --no-tty`；演示不会安装防火墙。
 
+## 在面板中检查更新（v3.1.3 起）
+
+运行 `sudo fw`，选择 **[9] 检查脚本更新**。发现新版后会询问是否下载安装；下载完成后校验固定提交的 SHA256、脚本语法和版本号，通过后替换程序。
+
+更新成功后面板退出，按提示重新运行 `sudo fw`（root 用户输入 `fw`）。更新不会自动应用规则或重启业务。具体版本是否需要重新应用规则，请阅读[更新记录](CHANGELOG.md)。
+
+有未应用草稿、待确认修改或隔离故障时，先处理当前状态再更新。下载失败、哈希不符、语法错误或版本不符都会拒绝安装；不会降级。检查仅在用户选择菜单时进行，不在后台自动更新。
+
+更新信息来自本仓库的 `update.manifest`，只解析版本、固定提交和 SHA256，不执行清单。该机制依赖 HTTPS 和仓库发布权限，不是独立签名验证。
+
+**v3.1.2 及更早版本还没有 [9] 菜单，需要按下面步骤手动升级一次。以后可直接在面板内更新。**
+
 ## 已安装旧版本，如何更新？
 
 1. 在面板确认没有“等待确认”的倒计时。若仍在倒计时中，先验证新 SSH 连接并运行 `sudo fw confirm`；已隔离时先通过商家控制台按恢复步骤处理。
@@ -79,11 +91,11 @@ sudo fw
    ```
 
 3. 重新运行本页“首次安装并打开面板”中的一键命令。安装器会校验新版并替换程序；无需卸载旧版，现有配置会保留。
-4. 检查面板标题是否为 **v3.1.2**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
+4. 检查面板标题是否为 **v3.1.3**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
 
-**v3.1.1 → v3.1.2 仅更新显示和日志措辞，不改变过滤策略，无需为本次界面更新重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
+**v3.1.1 / v3.1.2 → v3.1.3 更新显示并增加手动更新入口，不改变过滤策略，无需为本次升级重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
 
-本版把 SSH 专用策略列入安全组视图，并在列表下方逐条显示未应用的新增、删除、修改及顺序变化。SSH 策略继续在 `[4]` 管理，不会变成可用普通 ID 删除的规则。正常应用时的临时隔离提示改为 `[INFO]`，故障隔离仍是 `[ERR]`。
+本版将 SSH 专用策略、普通规则和变更状态统一在一张表中。变更列显示待新增、待删除、修改前/待修改、待排序和待确认；长地址会换行显示。SSH 策略继续在 `[4]` 管理，不会变成可用普通 ID 删除的规则。正常应用时的临时隔离提示改为 `[INFO]`，故障隔离仍是 `[ERR]`。
 
 ## 从 3.1.0 升级
 
@@ -118,6 +130,7 @@ sudo fw bind-service trading.service
 python3 tests/test_local.py
 python3 tests/test_installer.py
 python3 tests/test_ui.py
+python3 tests/test_update.py
 ```
 
 以上测试使用临时目录与模拟命令，不安装防火墙，不访问 GitHub。安装器测试需要支持 PTY 的 Unix 环境。测试范围和真实 Debian 虚拟机验证摘要见 [测试说明](docs/TESTING.md)。
