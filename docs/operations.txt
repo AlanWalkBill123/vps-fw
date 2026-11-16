@@ -5,7 +5,7 @@ VPS-FW v3.1.8 — 确认超时恢复版
 v3.1.8 仅对正常确认超时恢复上一次已确认配置；其他故障保持隔离。
 
 安装与首次使用
-  sudo bash vps-fw.sh
+  sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash vps-fw.sh
   fw
 建议首次安装和迁移都从 VNC 操作。先应用并确认防火墙，再启动交易程序。
 向导中的 SSH 端口只是探测建议，请用 ss -lntp 核对，尤其是 systemd socket activation。
@@ -57,7 +57,7 @@ A. 配置完整、无待确认修改，仅因异常被隔离：
      sudo fw restore
    校验失败则继续隔离。修复原因并恢复网络后，手动启动被挡住的业务服务。
 B. 倒计时超时或还有 pending.state：
-     sudo fw
+     sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw
    核对/修改草稿，菜单 [6] -> [3] 重新应用，然后在新倒计时内确认。
 C. 当前配置损坏：
    面板 [8] -> [1] 可将校验通过的历史版本导入草稿，再应用。

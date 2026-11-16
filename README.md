@@ -16,23 +16,23 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 连接 VPS，在交互终端执行以下命令。命令会下载安装器，校验并安装主脚本，然后打开面板：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/vps-fw.sh' 'cb2f2f5d685776ced9d06e3f159a110f234f50be9355ce67053a3168668a51ea'
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/install-vps-fw.sh' | sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/vps-fw.sh' 'cb2f2f5d685776ced9d06e3f159a110f234f50be9355ce67053a3168668a51ea'
 ```
 
-已登录为 `root` 时可去掉 `sudo`。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
+以上命令适用于已安装 sudo 且有相应权限的 root 和普通用户；只保留 `SSH_CONNECTION`、`SSH_CLIENT`，使向导能读取 SSH 来源。若 sudo 策略拒绝保留变量，请手动填写来源。VNC/Serial 会话本身没有 SSH 来源，仍需手动填写。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
 
 安装器和主脚本地址固定到同一提交；安装器会核验主脚本的 SHA256。管道中首次下载的安装器自身没有预先校验，需要信任其来源。希望先审阅安装器时，可下载并独立核验后再执行：
 
 ```bash
 curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/install-vps-fw.sh' -o install-vps-fw.sh
 # 先审阅 install-vps-fw.sh，并通过可信渠道独立核验其 SHA256
-sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/vps-fw.sh' 'cb2f2f5d685776ced9d06e3f159a110f234f50be9355ce67053a3168668a51ea'
+sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/e3256997544eb9c0986d8a52e6fe93185e66d58a/vps-fw.sh' 'cb2f2f5d685776ced9d06e3f159a110f234f50be9355ce67053a3168668a51ea'
 ```
 
 安装后，**以后打开面板只需运行**：
 
 ```bash
-sudo fw
+sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw
 ```
 
 如果已经是 `root`，运行 `fw` 即可。退出面板不会停止已经应用的防火墙。
@@ -56,14 +56,14 @@ sudo fw
 
 | 目的 | 命令 | 说明 |
 | --- | --- | --- |
-| 打开面板 | `sudo fw` | root 用户可直接输入 `fw` |
+| 打开面板 | `sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw` | root 用户可直接输入 `fw` |
 | 确认待确认规则 | `sudo fw confirm` | 先用新 SSH 连接验证 |
 | 检查健康状态 | `sudo fw health` | 通过时输出 `PASS` |
 | 查看状态 | `sudo fw status` | 查看面板状态及规则 |
 | 查看历史版本 | `sudo fw generations` | 列出可用于恢复的版本 ID |
 | 恢复历史版本 | `sudo fw recover 版本ID` | 需在控制台核对；应用后仍需确认 |
 
-如已隔离，通过商家 VNC 登录：没有待确认修改且保存配置完整时可执行 `sudo fw restore`；超时后用 `sudo fw` 打开面板，核对草稿，在菜单 `[6]` 按提示重新应用并确认。配置损坏时参考[完整恢复步骤](docs/operations.txt)。
+如已隔离，通过商家 VNC 登录：没有待确认修改且保存配置完整时可执行 `sudo fw restore`；超时后用 `sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw` 打开面板，核对草稿，在菜单 `[6]` 按提示重新应用并确认。配置损坏时参考[完整恢复步骤](docs/operations.txt)。
 
 `sudo fw lockdown` 会隔离所有非回环流量，交互终端需输入 `YES`；`--yes` 或非交互调用直接执行。`rollback` 和 `emergency-off` 也是隔离命令，**不会撤掉防护**。
 
@@ -71,9 +71,9 @@ sudo fw
 
 ## 在面板中检查更新（v3.1.3 起）
 
-运行 `sudo fw`，选择 **[9] 检查脚本更新**。发现新版后会询问是否下载安装；下载完成后校验固定提交的 SHA256、脚本语法和版本号，通过后替换程序。
+运行 `sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw`，选择 **[9] 检查脚本更新**。发现新版后会询问是否下载安装；下载完成后校验固定提交的 SHA256、脚本语法和版本号，通过后替换程序。
 
-更新成功后面板退出，按提示重新运行 `sudo fw`（root 用户输入 `fw`）。更新不会自动应用规则或重启业务。具体版本是否需要重新应用规则，请阅读[更新记录](CHANGELOG.md)。
+更新成功后面板退出，按提示重新运行 `sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw`（root 用户输入 `fw`）。更新不会自动应用规则或重启业务。具体版本是否需要重新应用规则，请阅读[更新记录](CHANGELOG.md)。
 
 有未应用草稿、待确认修改或隔离故障时，先处理当前状态再更新。下载失败、哈希不符、语法错误或版本不符都会拒绝安装；不会降级。检查仅在用户选择菜单时进行，不在后台自动更新。
 
@@ -91,7 +91,7 @@ sudo fw
    ```
 
 3. 重新运行本页“首次安装并打开面板”中的一键命令。安装器会校验新版并替换程序；无需卸载旧版，现有配置会保留。
-4. 检查面板标题是否为 **v3.1.8**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
+4. 检查面板标题是否为 **v3.1.8**。以后仍用 `sudo --preserve-env=SSH_CONNECTION,SSH_CLIENT fw` 打开面板；root 用户直接运行 `fw`。
 
 **v3.1.7 → v3.1.8 调整确认超时行为：恢复上一次已确认配置；无可用版本或异常仍隔离。升级不立即改动现有规则，下次正常应用时自动记录当前健康、已确认的配置作为恢复基线。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
 
