@@ -1,6 +1,6 @@
 # VPS-FW
 
-Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.6**。
+Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.7**。
 
 > **严格隔离模式：** 未确认超时或检测到配置损坏时会阻断非回环 IP 流量，包括已有 SSH。不会自动撤掉保护。首次部署和故障恢复请使用商家的 VNC 控制台。
 
@@ -16,7 +16,7 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 连接 VPS，在交互终端执行以下命令。命令会下载安装器，校验并安装主脚本，然后打开面板：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/4efe60d680be79824cea9467ad7bdda142a4699e/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/4efe60d680be79824cea9467ad7bdda142a4699e/vps-fw.sh' '1a730e9988645a96be9cd92dc85c834080ee837c30fe19bdc2d49bc2c5adc281'
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/721c792bfcdc8477f3a24f3092fd6c188f51b9b1/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/721c792bfcdc8477f3a24f3092fd6c188f51b9b1/vps-fw.sh' '43414a2ffd40650bc777b0d9d0af1621131182cdb73f8aaf3131a855bfe8ff03'
 ```
 
 已登录为 `root` 时可去掉 `sudo`。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
@@ -24,9 +24,9 @@ curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/4efe60d680b
 安装器和主脚本地址固定到同一提交；安装器会核验主脚本的 SHA256。管道中首次下载的安装器自身没有预先校验，需要信任其来源。希望先审阅安装器时，可下载并独立核验后再执行：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/4efe60d680be79824cea9467ad7bdda142a4699e/install-vps-fw.sh' -o install-vps-fw.sh
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/721c792bfcdc8477f3a24f3092fd6c188f51b9b1/install-vps-fw.sh' -o install-vps-fw.sh
 # 先审阅 install-vps-fw.sh，并通过可信渠道独立核验其 SHA256
-sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/4efe60d680be79824cea9467ad7bdda142a4699e/vps-fw.sh' '1a730e9988645a96be9cd92dc85c834080ee837c30fe19bdc2d49bc2c5adc281'
+sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/721c792bfcdc8477f3a24f3092fd6c188f51b9b1/vps-fw.sh' '43414a2ffd40650bc777b0d9d0af1621131182cdb73f8aaf3131a855bfe8ff03'
 ```
 
 安装后，**以后打开面板只需运行**：
@@ -91,9 +91,9 @@ sudo fw
    ```
 
 3. 重新运行本页“首次安装并打开面板”中的一键命令。安装器会校验新版并替换程序；无需卸载旧版，现有配置会保留。
-4. 检查面板标题是否为 **v3.1.6**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
+4. 检查面板标题是否为 **v3.1.7**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
 
-**v3.1.5 → v3.1.6 仅调整菜单及提示文案，不改变现有策略，无需仅为升级重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
+**v3.1.6 → v3.1.7 增加待确认期间的主菜单自动刷新：空闲约 5 秒更新倒计时，保留未提交的输入。子菜单不自动刷新。不改变现有策略，无需仅为升级重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
 
 ## 规则表怎么看？
 
