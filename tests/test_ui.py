@@ -23,8 +23,8 @@ with tempfile.TemporaryDirectory() as tmp:
  check('changed row',f'printf %s "{row}" > "$CONF_DIR/rules.db"; printf %s "{row.replace("3000","3001")}" > "$DRAFT_DIR/rules.db"; render_rules_table "$DRAFT_DIR"',('修改前','待修改','3000','3001'))
  check('unchanged',f'printf %s "{row}" > "$CONF_DIR/rules.db"; cp "$CONF_DIR/rules.db" "$DRAFT_DIR/rules.db"; render_rules_table "$DRAFT_DIR"',no=('待新增','待删除','待修改'))
  check('order changes','printf "%s\\n" "1|1|accept|in|host|tcp|22|any|a" "2|1|drop|in|host|tcp|22|any|b" > "$CONF_DIR/rules.db"; sed -n "2p;1p" "$CONF_DIR/rules.db" > /dev/null; awk \'{a[NR]=$0} END {print a[2];print a[1]}\' "$CONF_DIR/rules.db" > "$DRAFT_DIR/rules.db"; render_rules_table "$DRAFT_DIR"',('待排序','#2','#1'))
- check('SSH config changes','CFG_SSH_MODE=whitelist; CFG_SSH_SOURCES=192.0.2.8; save_conf "$DRAFT_DIR"; render_rules_table "$DRAFT_DIR"',('待修改','192.0.2.8'))
- check('pending confirmed distinction', 'mkdir -p "$CONF_DIR"; touch "$CONF_DIR/pending.state"; render_rules_table "$DRAFT_DIR"', ('待确认',))
+ check('SSH config changes','CFG_SSH_MODE=whitelist; CFG_SSH_SOURCES=192.0.2.8; save_conf "$DRAFT_DIR"; render_rules_table "$DRAFT_DIR"',('待新增','192.0.2.8'))
+ check('pending confirmed distinction', 'mkdir -p "$CONF_DIR"; touch "$CONF_DIR/pending.state"; CFG_SSH_MODE=whitelist; CFG_SSH_SOURCES=192.0.2.9; save_conf "$CONF_DIR"; save_conf "$DRAFT_DIR"; render_rules_table "$DRAFT_DIR"', ('待确认',))
  check('long IPv6 preserved', 'CFG_SSH_MODE=whitelist; CFG_SSH_SOURCES=2001:db8:1234:5678:abcd:ef01:2345:6789; save_conf "$DRAFT_DIR"; render_rules_table "$DRAFT_DIR"', ('2001:db8:1234:5678', ':abcd:ef01:2345:67', '89'))
  # The table contains rule rows only, and each field has one vocabulary.
  out=run('render_rules_table "$DRAFT_DIR"')

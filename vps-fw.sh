@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.4"
+VERSION="3.1.5"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -1132,9 +1132,9 @@ ui_policy_rows() (
     case "$CFG_SSH_MODE" in
       whitelist) printf 'SSH|1|accept|in|host|tcp|%s|%s|SSH白名单\n' "$CFG_SSH_PORT" "$CFG_SSH_SOURCES" ;;
       hidden) printf 'SSH|1|drop|in|host|tcp|%s|any|SSH公网关闭\n' "$CFG_SSH_PORT" ;;
-      none) printf 'SSH|0|—|in|host|tcp|%s|—|专用策略关闭\n' "$CFG_SSH_PORT" ;;
+      none) : ;;
     esac
-    if [[ -n "$CFG_SSH_BLOCK" ]]; then
+    if [[ "$CFG_SSH_MODE" != none && -n "$CFG_SSH_BLOCK" ]]; then
       printf 'SSH-B|%s|drop|in|host|tcp|%s|%s|SSH黑名单\n' "$( [[ "$CFG_SSH_MODE" == none ]] && echo 0 || echo 1 )" "$CFG_SSH_PORT" "$CFG_SSH_BLOCK"
     fi
   fi
@@ -1275,7 +1275,7 @@ confirm_ssh_lockout_risk() {
 
 first_time_setup() {
   clear_screen
-  printf '%s━━ 首次配置向导 (失败封闭初始化) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n' "$C_CYAN$C_BOLD" "$C_RESET"
+  printf '%s━━ 首次配置向导 · v%s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━%s\n\n' "$C_CYAN$C_BOLD" "$VERSION" "$C_RESET"
   local def_wan ssh_port client_ip
   def_wan="$(detect_wan_if)"
   ssh_port="$(detect_ssh_port)"
@@ -1296,7 +1296,7 @@ first_time_setup() {
   info "自动探测到当前环境："
   printf '    • 公网网卡 : %s%s%s\n' "$C_GREEN" "$def_wan" "$C_RESET"
   printf '    • SSH 端口 : %s%s%s\n' "$C_GREEN" "$ssh_port" "$C_RESET"
-  printf '    • 你的来源 : %s%s%s\n\n' "$C_GREEN" "${client_ip:-未知 (如为 VNC 可留空放行 ANY)}" "$C_RESET"
+  printf '    • 你的来源 : %s%s%s\n\n' "$C_GREEN" "${client_ip:-未探测到，请明确选择访问来源}" "$C_RESET"
 
   printf '  确认公网网卡名称 [直接回车使用 %s]: ' "$def_wan"
   local in_wan=""
@@ -1305,15 +1305,21 @@ first_time_setup() {
   CFG_WAN_IF="${in_wan:-$def_wan}"
   validate_iface "$CFG_WAN_IF" || die "非法网卡名: $CFG_WAN_IF"
 
-  local ssh_cidr="any"
-  if [[ -n "$client_ip" ]]; then
-    printf '  SSH 访问方式: [1] 仅限当前 IP (%s；地址变化后须用 VPN/控制台恢复)   [2] 允许 ANY (方便多地登录) [默认 1]: ' "$client_ip"
-    local ssh_mode=""
-    read -r ssh_mode || true
-    if [[ "$(trim "$ssh_mode")" != "2" ]]; then
-      ssh_cidr="$(validate_cidrs "$client_ip")" || { err "来源地址无效"; return 1; }
-    fi
-  fi
+  local ssh_cidr="" ssh_choice="" entered=""
+  printf '  SSH 来源: [1] 指定 IP/CIDR [2] 任意来源 [0] 取消（回车取消）: '
+  read -r ssh_choice || return 1
+  case "$(trim "$ssh_choice")" in
+    1)
+      printf '  允许来源 IP/CIDR（回车使用探测值 %s）: ' "${client_ip:-无}"
+      read -r entered || return 1
+      entered="$(trim "$entered")"; entered="${entered:-$client_ip}"
+      ssh_cidr="$(validate_cidrs "$entered")" && [[ "$ssh_cidr" != any ]] || { err "必须输入有效的指定来源；已取消向导"; return 1; }
+      ;;
+    2)
+      ask_yesno "确认允许任意 IPv4/IPv6 来源连接 SSH？" n || return 1
+      ssh_cidr=any ;;
+    *) info "已取消首次配置，未应用规则"; return 1 ;;
+  esac
 
   save_conf "$DRAFT_DIR" || return 1
   : > "$(rules_file "$DRAFT_DIR")" || return 1
@@ -1455,24 +1461,58 @@ action_advanced_rule() {
   pause_prompt
 }
 
+action_manage_ssh_policy() {
+  local choice="" value=""
+  printf '  SSH 专用项: [1] 修改白名单 [2] 关闭公网 SSH [3] 取消专用限制 [4] 修改/清除黑名单 [0] 返回: '
+  read -r choice || return 1
+  case "$(trim "$choice")" in
+    1)
+      printf '  白名单 IP/CIDR（留空取消）: '; read -r value || return 1
+      value="$(validate_cidrs "$value")" && [[ "$value" != any ]] || { err "必须指定有效 IP/CIDR，未修改"; return 1; }
+      CFG_SSH_MODE=whitelist; CFG_SSH_SOURCES="$value" ;;
+    2)
+      warn "将删除白名单放行并拒绝公网 SSH 新连接；请先准备商家控制台。"
+      ask_yesno "确认写入草稿？" n || return 0
+      CFG_SSH_MODE=hidden; CFG_SSH_SOURCES="" ;;
+    3)
+      warn "将移除 SSH 专用限制和专用黑名单的作用，改按普通规则判断；可能扩大公网 SSH 访问范围。"
+      ask_yesno "确认取消专用限制？" n || return 0
+      CFG_SSH_MODE=none; CFG_SSH_SOURCES="" ;;
+    4)
+      printf '  黑名单 IP/CIDR（留空清除）: '; read -r value || return 1
+      if [[ -n "$value" ]]; then
+        value="$(validate_cidrs "$value")" && [[ "$value" != any ]] || { err "黑名单必须指定地址"; return 1; }
+      fi
+      ask_yesno "确认修改/清除黑名单？" n || return 0
+      CFG_SSH_BLOCK="$value" ;;
+    *) return 0 ;;
+  esac
+  save_conf "$DRAFT_DIR" || return 1
+  check_draft_dirty
+  ok "SSH 专用项已更新草稿，请在 [6] 应用并验证连接"
+}
+
 action_manage_rules() {
   local rf
   rf="$(rules_file "$DRAFT_DIR")"
-  [[ -s "$rf" ]] || { warn "当前没有任何规则"; pause_prompt; return; }
+  load_conf "$DRAFT_DIR" || return 1
   printf '\n%s── [3] 编辑 / 启停 / 删除 / 排序规则 ────────────────────────────────────────%s\n' "$C_CYAN" "$C_RESET"
   printf '  [1] 启用 / 停用指定规则\n'
   printf '  [2] 删除规则 (支持多个如 2,3)\n'
   printf '  [3] 调整规则优先级 (上移 / 下移)\n'
+  printf '  [4] 管理 SSH / SSH-B（修改、关闭公网或取消限制）\n'
   printf '  [0] 返回\n'
   printf '  请选择: '
   local opt=""
   read -r opt || return
   case "$(trim "$opt")" in
+    4) action_manage_ssh_policy; pause_prompt; return ;;
     1)
       printf '  输入要切换启停的规则 ID: '
       local rid=""
       read -r rid || return
       rid="$(trim "$rid")"
+      if [[ "$rid" == SSH || "$rid" == SSH-B ]]; then action_manage_ssh_policy; pause_prompt; return; fi
       rule_exists_in_dir "$DRAFT_DIR" "$rid" || { err "找不到规则 #$rid"; pause_prompt; return; }
       local tmp
       tmp="$(mktemp "$DRAFT_DIR/.rules.XXXXXX")" || return 1
@@ -1488,6 +1528,10 @@ action_manage_rules() {
       rids="${rids//，/,}"
       rids="${rids//[[:space:]]/}"
       [[ -n "$rids" ]] || return
+      if [[ ",$rids," == *,SSH,* || ",$rids," == *,SSH-B,* ]]; then
+        [[ "$rids" == SSH || "$rids" == SSH-B ]] || { warn "SSH 专用项请单独操作，不与数字 ID 批量删除"; pause_prompt; return; }
+        action_manage_ssh_policy; pause_prompt; return
+      fi
       local -a del_want=()
       local del_id del_ok="" del_miss=""
       IFS=',' read -r -a del_want <<< "$rids"
@@ -1999,7 +2043,7 @@ action_script_update() {
 interactive_loop() {
   if [[ ! -f "$(conf_file "$CONF_DIR")" ]]; then
     init_draft_from_conf || return 1
-    first_time_setup
+    first_time_setup || return 1
   else
     init_draft_from_conf || return 1
   fi
