@@ -1,6 +1,6 @@
 # VPS-FW
 
-Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.3**。
+Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.4**。
 
 > **严格隔离模式：** 未确认超时或检测到配置损坏时会阻断非回环 IP 流量，包括已有 SSH。不会自动撤掉保护。首次部署和故障恢复请使用商家的 VNC 控制台。
 
@@ -16,7 +16,7 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 连接 VPS，在交互终端执行以下命令。命令会下载安装器，校验并安装主脚本，然后打开面板：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/vps-fw.sh' 'f1148b30041cba3513c5890a99b918affe65209a8f042cfdd3fc808f8ae82db5'
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/vps-fw.sh' 'cc744821aacb3dda166be6960c990b895b72358826ce2ccbed6aa36be0878eef'
 ```
 
 已登录为 `root` 时可去掉 `sudo`。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
@@ -24,9 +24,9 @@ curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8
 安装器和主脚本地址固定到同一提交；安装器会核验主脚本的 SHA256。管道中首次下载的安装器自身没有预先校验，需要信任其来源。希望先审阅安装器时，可下载并独立核验后再执行：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/install-vps-fw.sh' -o install-vps-fw.sh
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/install-vps-fw.sh' -o install-vps-fw.sh
 # 先审阅 install-vps-fw.sh，并通过可信渠道独立核验其 SHA256
-sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/ff1266ff7a8638a40f16be2c097275fc0dc549a3/vps-fw.sh' 'f1148b30041cba3513c5890a99b918affe65209a8f042cfdd3fc808f8ae82db5'
+sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/vps-fw.sh' 'cc744821aacb3dda166be6960c990b895b72358826ce2ccbed6aa36be0878eef'
 ```
 
 安装后，**以后打开面板只需运行**：
@@ -91,11 +91,21 @@ sudo fw
    ```
 
 3. 重新运行本页“首次安装并打开面板”中的一键命令。安装器会校验新版并替换程序；无需卸载旧版，现有配置会保留。
-4. 检查面板标题是否为 **v3.1.3**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
+4. 检查面板标题是否为 **v3.1.4**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
 
-**v3.1.1 / v3.1.2 → v3.1.3 更新显示并增加手动更新入口，不改变过滤策略，无需为本次升级重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
+**v3.1.3 → v3.1.4 只整理规则表显示，无需为本次升级重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
 
-本版将 SSH 专用策略、普通规则和变更状态统一在一张表中。变更列显示待新增、待删除、修改前/待修改、待排序和待确认；长地址会换行显示。SSH 策略继续在 `[4]` 管理，不会变成可用普通 ID 删除的规则。正常应用时的临时隔离提示改为 `[INFO]`，故障隔离仍是 `[ERR]`。
+## 规则表怎么看？
+
+表头统一为：**ID、状态、方向、动作、协议、端口、来源/目标 IP、范围、备注**。表内只显示规则和配置项目，不插入操作说明段落。
+
+- **状态**：正常规则显示 `启用` 或 `停用`；仅切换开关时显示 `待启用` 或 `待停用`。新增、删除、修改、排序和确认使用 `待新增/启用`、`待删除/停用`、`待修改/启用`、`待排序/启用`、`待确认/启用` 等形式。斜杠后的词表示该行的开关状态，避免把“新增一条停用规则”误看成放行。
+- **修改前**：例如 `修改前/启用` 是旧值对照；相同 ID 的下一行是草稿目标。新修改需通过 `[6]` 应用；`待确认` 表示规则已应用，仍在确认倒计时中。
+- **方向与动作**：方向只有入站、出站；动作统一为允许、拒绝。`—` 表示不适用，不表示放行。
+- **来源/目标 IP**：入站看来源，出站看目标；`任意地址(双栈)` 包括 IPv4 与 IPv6。协议或端口的 `全部` 表示不限制该字段，长内容在单元格内换行。
+- **SSH 行**：白名单显示为 `入站 / 允许`，来源列给出允许范围；该范围仍受普通规则顺序约束。SSH/SSH-B 在 `[4]` 管理，普通数字 ID 在 `[3]` 管理。`SSH` 行停用表示专用策略关闭，不等于实际 SSH 服务已关闭。
+
+状态描述的是配置及待处理操作；实际防护健康状态请看上方状态面板或执行 `fw health`。
 
 ## 从 3.1.0 升级
 
