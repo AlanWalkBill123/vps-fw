@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.1"
+VERSION="3.1.2"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -1023,8 +1023,6 @@ dir_action_label() {
 
 render_dashboard() {
   load_conf "$DRAFT_DIR" >/dev/null 2>&1 || true
-  printf "  公网 SSH 专用策略: %s | 端口: %s | 白名单: %s（公网新连接的来源上限；普通规则仍按顺序）\n" "$CFG_SSH_MODE" "$CFG_SSH_PORT" "${CFG_SSH_SOURCES:-无}"
-  printf "  SSH 独立黑名单: %s（普通规则保持原顺序）\n" "${CFG_SSH_BLOCK:-无}"
   local os_name wan_ips live_h exp_h status_txt boot_txt watch_txt ping_txt out_txt d2h_txt trust_txt
   os_name="$(truncate_str "$(detect_os_name)" 30)"
   local max_ip_w=$(( 29 - ${#CFG_WAN_IF} ))
@@ -1127,6 +1125,63 @@ render_dashboard() {
   fi
 }
 
+# Display-only views: never write configuration or synthesize database rules.
+render_ssh_policy() (
+  load_conf "$1" >/dev/null 2>&1 || return 1
+  printf '  SSH 专用策略（宿主机公网入站；在 [4] 管理，不使用普通规则 ID）\n'
+  case "$CFG_SSH_MODE" in
+    whitelist)
+      printf '    [SSH] 白名单 | TCP %s | 来源: %s\n' "$CFG_SSH_PORT" "$CFG_SSH_SOURCES"
+      printf '          其他来源拒绝；白名单内仍受普通规则顺序约束。\n' ;;
+    hidden) printf '    [SSH] 隐身 | 公网 TCP %s 拒绝 | 信任接口: %s\n' "$CFG_SSH_PORT" "${CFG_TRUSTED_IFS:-无}" ;;
+    none) printf '    [SSH] 专用策略关闭；SSH 按普通规则及内置信任接口策略处理。\n' ;;
+  esac
+  if [[ "$CFG_SSH_MODE" != none ]]; then
+    printf '    [SSH-BLOCK] 优先黑名单: %s\n' "${CFG_SSH_BLOCK:-无}"
+  else
+    printf '    [SSH-BLOCK] 随专用策略关闭；保存的黑名单: %s\n' "${CFG_SSH_BLOCK:-无}"
+  fi
+)
+
+render_draft_changes() {
+  local dir="$1" old new oldconf newconf
+  [[ "$dir" == "$DRAFT_DIR" && "$dir" != "$CONF_DIR" ]] || return 0
+  old="$(rules_file "$CONF_DIR")"; new="$(rules_file "$dir")"
+  oldconf="$(conf_file "$CONF_DIR")"; newconf="$(conf_file "$dir")"
+  [[ -f "$old" ]] || old=/dev/null
+  [[ -f "$new" ]] || new=/dev/null
+  [[ -f "$oldconf" ]] || oldconf=/dev/null
+  [[ -f "$newconf" ]] || newconf=/dev/null
+  if cmp -s "$old" "$new" && cmp -s "$oldconf" "$newconf"; then return 0; fi
+  printf '\n  待应用变更（草稿对比当前已保存版本；下列变更尚未生效）\n'
+  awk -F'|' '
+    function detail(row, a) {
+      split(row,a,"|")
+      return "#" a[1] " | " (a[2]==1?"启用":"停用") " | " (a[4]=="in"?"入站":"出站") (a[3]=="accept"?"允许":"拒绝") " | " a[6] " " a[7] " | 来源/目标: " a[8] " | 范围: " a[5] " | " a[9]
+    }
+    $0=="" || /^#/ { next }
+    FILENAME==ARGV[1] { before[$1]=$0; ids[++n]=$1; next }
+    { after[$1]=$0; nextids[++m]=$1 }
+    END {
+      for(i=1;i<=m;i++) { id=nextids[i]; if(!(id in before)) print "    [+ 新增] " detail(after[id]); else if(before[id]!=after[id]) { print "    [~ 修改前] " detail(before[id]); print "    [~ 修改后] " detail(after[id]) } }
+      for(i=1;i<=n;i++) { id=ids[i]; if(!(id in after)) print "    [- 删除] " detail(before[id]); else oldorder=oldorder " #" id }
+      for(i=1;i<=m;i++) { id=nextids[i]; if(id in before) neworder=neworder " #" id }
+      if(oldorder!=neworder) { print "    [↕ 顺序] 原有规则调整前:" oldorder; print "               调整后:" neworder }
+    }' "$old" "$new"
+  awk -F= '
+    function label(k) {
+      if(k=="SSH_MODE") return "SSH 模式"; if(k=="SSH_PORT") return "SSH 端口"
+      if(k=="SSH_SOURCES") return "SSH 白名单"; if(k=="SSH_BLOCK") return "SSH 优先黑名单"
+      if(k=="WAN_IF") return "公网接口"; if(k=="TRUSTED_IFS") return "信任接口"
+      if(k=="OUTBOUND_POLICY") return "默认出站策略"; if(k=="PING_ALLOW") return "公网 Ping"
+      return k
+    }
+    /^#/ || $0=="" || $1=="NEXT_ID" { next }
+    FILENAME==ARGV[1] { old[$1]=$2; next }
+    { if(old[$1]!=$2) print "    [~ 配置] " label($1) ": " (old[$1]==""?"未设置":old[$1]) " → " $2 }
+  ' "$oldconf" "$newconf"
+}
+
 render_rules_table() {
   local dir="${1:-$DRAFT_DIR}"
   local rf
@@ -1134,16 +1189,21 @@ render_rules_table() {
   local W=92
   local hline
   hline="$(repeat_char '─' "$W")"
-  printf '%s┌─ 安全组规则列表 %s┐%s\n' "$C_BLUE" "$(repeat_char '─' $(( W - 17 )))" "$C_RESET"
+  printf '%s── 安全组规则列表 %s%s\n' "$C_BLUE" "$(repeat_char '─' $(( W - 17 )))" "$C_RESET"
+  printf '  当前列表: %s\n' "$( [[ "$dir" == "$DRAFT_DIR" && "$dir" != "$CONF_DIR" ]] && printf '编辑视图（未应用的差异见下方变更清单）' || printf '已保存版本' )"
+  render_ssh_policy "$dir"
+  printf '  普通规则（数字 ID 在 [3] 管理）\n'
+  printf '%s┌%s┐%s\n' "$C_BLUE" "$hline" "$C_RESET"
   local hdr
   hdr=" $(pad_right "ID" 5)$(pad_right "状态" 6)$(pad_right "方向/策略" 10)$(pad_right "协议" 9)$(pad_right "端口" 14)$(pad_right "来源 / 目标 IP" 22)$(pad_right "作用范围" 13)$(pad_right "备注" 12)"
   printf '%s│%s%s%s│%s\n' "$C_BLUE" "$C_BOLD" "$(pad_right "$hdr" "$W")" "$C_RESET$C_BLUE" "$C_RESET"
   printf '%s├%s┤%s\n' "$C_BLUE" "$hline" "$C_RESET"
 
   if [[ ! -s "$rf" ]]; then
-    local empty_msg="  (当前暂无自定义规则，所有公网入站和 Docker 映射端口默认均被拒绝)"
+    local empty_msg="  (暂无普通规则；SSH 见上方专用策略，其他流量按内置规则和默认策略处理)"
     printf '%s│%s%s%s│%s\n' "$C_BLUE" "$C_DIM" "$(pad_right "$empty_msg" "$W")" "$C_RESET$C_BLUE" "$C_RESET"
     printf '%s└%s┘%s\n' "$C_BLUE" "$hline" "$C_RESET"
+    render_draft_changes "$dir"
     return
   fi
 
@@ -1167,6 +1227,7 @@ render_rules_table() {
     printf '%s│%s%s%s│%s\n' "$C_BLUE" "$C_RESET" "$(pad_right "$row" "$W")" "$C_BLUE" "$C_RESET"
   done < "$rf"
   printf '%s└%s┘%s\n' "$C_BLUE" "$hline" "$C_RESET"
+  render_draft_changes "$dir"
 }
 
 # ---------- 首次向导 ----------
@@ -2223,7 +2284,11 @@ quarantine_locked() {
     return 1
   fi
   logger -t vps-fw -- "QUARANTINE: $reason" 2>/dev/null || true
-  err "已进入网络隔离（包括已有 SSH）；请通过 VNC 恢复。原因: $reason"
+  if [[ "${2:-0}" == 1 ]]; then
+    info "正在更新防火墙，已临时隔离网络（可能中断 SSH）；完成后自动恢复所选策略。"
+  else
+    err "已进入网络隔离（包括已有 SSH）；请通过 VNC 恢复。原因: $reason"
+  fi
   if [[ "${2:-0}" == 1 ]]; then
     if systemctl is-failed --quiet "$GUARD_UNIT"; then
       systemctl reset-failed "$GUARD_UNIT" || return 1
