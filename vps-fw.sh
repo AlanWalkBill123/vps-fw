@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.2"
+VERSION="3.1.3"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -1125,109 +1125,104 @@ render_dashboard() {
   fi
 }
 
-# Display-only views: never write configuration or synthesize database rules.
-render_ssh_policy() (
-  load_conf "$1" >/dev/null 2>&1 || return 1
-  printf '  SSH 专用策略（宿主机公网入站；在 [4] 管理，不使用普通规则 ID）\n'
-  case "$CFG_SSH_MODE" in
-    whitelist)
-      printf '    [SSH] 白名单 | TCP %s | 来源: %s\n' "$CFG_SSH_PORT" "$CFG_SSH_SOURCES"
-      printf '          其他来源拒绝；白名单内仍受普通规则顺序约束。\n' ;;
-    hidden) printf '    [SSH] 隐身 | 公网 TCP %s 拒绝 | 信任接口: %s\n' "$CFG_SSH_PORT" "${CFG_TRUSTED_IFS:-无}" ;;
-    none) printf '    [SSH] 专用策略关闭；SSH 按普通规则及内置信任接口策略处理。\n' ;;
-  esac
-  if [[ "$CFG_SSH_MODE" != none ]]; then
-    printf '    [SSH-BLOCK] 优先黑名单: %s\n' "${CFG_SSH_BLOCK:-无}"
-  else
-    printf '    [SSH-BLOCK] 随专用策略关闭；保存的黑名单: %s\n' "${CFG_SSH_BLOCK:-无}"
+# Read-only synthetic display rows. SSH identifiers never enter rules.db.
+ui_policy_rows() (
+  local dir="$1" rf
+  if load_conf "$dir" >/dev/null 2>&1; then
+    case "$CFG_SSH_MODE" in
+      whitelist) printf 'SSH|1|白名单|in|host|tcp|%s|%s|其他来源拒绝\n' "$CFG_SSH_PORT" "$CFG_SSH_SOURCES" ;;
+      hidden) printf 'SSH|1|drop|in|host|tcp|%s|any|公网隐身；信任接口: %s；[4]管理\n' "$CFG_SSH_PORT" "${CFG_TRUSTED_IFS:-无}" ;;
+      none) printf 'SSH|0|按规则|in|host|tcp|%s|—|按普通规则\n' "$CFG_SSH_PORT" ;;
+    esac
+    if [[ -n "$CFG_SSH_BLOCK" ]]; then
+      printf 'SSH-B|%s|drop|in|host|tcp|%s|%s|SSH优先黑名单\n' "$( [[ "$CFG_SSH_MODE" == none ]] && echo 0 || echo 1 )" "$CFG_SSH_PORT" "$CFG_SSH_BLOCK"
+    fi
   fi
+  rf="$(rules_file "$dir")"
+  [[ ! -f "$rf" ]] || cat "$rf"
+  printf '\n'
 )
 
-render_draft_changes() {
-  local dir="$1" old new oldconf newconf
-  [[ "$dir" == "$DRAFT_DIR" && "$dir" != "$CONF_DIR" ]] || return 0
-  old="$(rules_file "$CONF_DIR")"; new="$(rules_file "$dir")"
-  oldconf="$(conf_file "$CONF_DIR")"; newconf="$(conf_file "$dir")"
-  [[ -f "$old" ]] || old=/dev/null
-  [[ -f "$new" ]] || new=/dev/null
-  [[ -f "$oldconf" ]] || oldconf=/dev/null
-  [[ -f "$newconf" ]] || newconf=/dev/null
-  if cmp -s "$old" "$new" && cmp -s "$oldconf" "$newconf"; then return 0; fi
-  printf '\n  待应用变更（草稿对比当前已保存版本；下列变更尚未生效）\n'
-  awk -F'|' '
-    function detail(row, a) {
-      split(row,a,"|")
-      return "#" a[1] " | " (a[2]==1?"启用":"停用") " | " (a[4]=="in"?"入站":"出站") (a[3]=="accept"?"允许":"拒绝") " | " a[6] " " a[7] " | 来源/目标: " a[8] " | 范围: " a[5] " | " a[9]
-    }
-    $0=="" || /^#/ { next }
-    FILENAME==ARGV[1] { before[$1]=$0; ids[++n]=$1; next }
-    { after[$1]=$0; nextids[++m]=$1 }
-    END {
-      for(i=1;i<=m;i++) { id=nextids[i]; if(!(id in before)) print "    [+ 新增] " detail(after[id]); else if(before[id]!=after[id]) { print "    [~ 修改前] " detail(before[id]); print "    [~ 修改后] " detail(after[id]) } }
-      for(i=1;i<=n;i++) { id=ids[i]; if(!(id in after)) print "    [- 删除] " detail(before[id]); else oldorder=oldorder " #" id }
-      for(i=1;i<=m;i++) { id=nextids[i]; if(id in before) neworder=neworder " #" id }
-      if(oldorder!=neworder) { print "    [↕ 顺序] 原有规则调整前:" oldorder; print "               调整后:" neworder }
-    }' "$old" "$new"
-  awk -F= '
-    function label(k) {
-      if(k=="SSH_MODE") return "SSH 模式"; if(k=="SSH_PORT") return "SSH 端口"
-      if(k=="SSH_SOURCES") return "SSH 白名单"; if(k=="SSH_BLOCK") return "SSH 优先黑名单"
-      if(k=="WAN_IF") return "公网接口"; if(k=="TRUSTED_IFS") return "信任接口"
-      if(k=="OUTBOUND_POLICY") return "默认出站策略"; if(k=="PING_ALLOW") return "公网 Ping"
-      return k
-    }
-    /^#/ || $0=="" || $1=="NEXT_ID" { next }
-    FILENAME==ARGV[1] { old[$1]=$2; next }
-    { if(old[$1]!=$2) print "    [~ 配置] " label($1) ": " (old[$1]==""?"未设置":old[$1]) " → " $2 }
-  ' "$oldconf" "$newconf"
+render_rules_table() {
+  local dir="${1:-$DRAFT_DIR}" base="$CONF_DIR" state="已保存"
+  [[ ! -f "$(pend_file "$CONF_DIR")" ]] || state="待确认"
+  [[ "$dir" != "$CONF_DIR" ]] || base="$dir"
+  {
+    awk -F'|' -v state="$state" '
+      !NF || $0=="" || /^#/ {next}
+      FILENAME==ARGV[1] {old[$1]=$0; ids[++n]=$1; next}
+      {new[$1]=$0; order[++m]=$1}
+      END {
+        for(i=1;i<=n;i++) if(ids[i] in new) prev[++p]=ids[i]
+        for(i=1;i<=m;i++) if(order[i] in old) rank[order[i]]=++q
+        for(i=1;i<=p;i++) if(rank[prev[i]]!=i) moved[prev[i]]=1
+        for(i=1;i<=m;i++) {
+          id=order[i]
+          if(!(id in old)) print "待新增|" new[id]
+          else if(old[id]!=new[id]) {print "修改前|" old[id]; print "待修改|" new[id]}
+          else print (moved[id]?"待排序":state) "|" new[id]
+        }
+        for(i=1;i<=n;i++) if(!(ids[i] in new)) print "待删除|" old[ids[i]]
+      }' <(ui_policy_rows "$base") <(ui_policy_rows "$dir")
+    local oldconf newconf
+    oldconf="$(conf_file "$base")"; newconf="$(conf_file "$dir")"
+    [[ -f "$oldconf" ]] || oldconf=/dev/null
+    [[ -f "$newconf" ]] || newconf=/dev/null
+    awk -F= '
+      /^#/ || !NF || $1=="NEXT_ID" || /^SSH_/ {next}
+      FILENAME==ARGV[1] {old[$1]=$2;next}
+      {if(old[$1]!=$2) print "待设置|设置|1|配置|—|—|—|—|—|" $1 ": " old[$1] " → " $2}
+    ' "$oldconf" "$newconf"
+  } | ui_render_grid
 }
 
-render_rules_table() {
-  local dir="${1:-$DRAFT_DIR}"
-  local rf
-  rf="$(rules_file "$dir")"
-  local W=92
-  local hline
-  hline="$(repeat_char '─' "$W")"
-  printf '%s── 安全组规则列表 %s%s\n' "$C_BLUE" "$(repeat_char '─' $(( W - 17 )))" "$C_RESET"
-  printf '  当前列表: %s\n' "$( [[ "$dir" == "$DRAFT_DIR" && "$dir" != "$CONF_DIR" ]] && printf '编辑视图（未应用的差异见下方变更清单）' || printf '已保存版本' )"
-  render_ssh_policy "$dir"
-  printf '  普通规则（数字 ID 在 [3] 管理）\n'
-  printf '%s┌%s┐%s\n' "$C_BLUE" "$hline" "$C_RESET"
-  local hdr
-  hdr=" $(pad_right "ID" 5)$(pad_right "状态" 6)$(pad_right "方向/策略" 10)$(pad_right "协议" 9)$(pad_right "端口" 14)$(pad_right "来源 / 目标 IP" 22)$(pad_right "作用范围" 13)$(pad_right "备注" 12)"
-  printf '%s│%s%s%s│%s\n' "$C_BLUE" "$C_BOLD" "$(pad_right "$hdr" "$W")" "$C_RESET$C_BLUE" "$C_RESET"
-  printf '%s├%s┤%s\n' "$C_BLUE" "$hline" "$C_RESET"
-
-  if [[ ! -s "$rf" ]]; then
-    local empty_msg="  (暂无普通规则；SSH 见上方专用策略，其他流量按内置规则和默认策略处理)"
-    printf '%s│%s%s%s│%s\n' "$C_BLUE" "$C_DIM" "$(pad_right "$empty_msg" "$W")" "$C_RESET$C_BLUE" "$C_RESET"
-    printf '%s└%s┘%s\n' "$C_BLUE" "$hline" "$C_RESET"
-    render_draft_changes "$dir"
-    return
-  fi
-
-  local rid enabled action rdir scope proto ports cidr comment
-  while IFS='|' read -r rid enabled action rdir scope proto ports cidr comment || [[ -n "$rid" ]]; do
-    [[ -z "$rid" || "$rid" == \#* ]] && continue
-    local st_s act_s pr_s pt_s ip_s sc_s cm_s row
-    [[ "$enabled" == "1" ]] && st_s="${C_GREEN}启用${C_RESET}" || st_s="${C_DIM}停用${C_RESET}"
-    act_s="$(dir_action_label "$rdir" "$action")"
-    pr_s="$(to_upper "$proto")"
-    [[ "$pr_s" == "BOTH" ]] && pr_s="TCP+UDP"
-    pt_s="$(truncate_str "$( [[ "$ports" == "any" ]] && printf 'ANY' || printf '%s' "$ports" )" 13)"
-    if [[ "$cidr" == "any" ]]; then
-      ip_s="ANY (IPv4+IPv6)"
-    else
-      ip_s="$(truncate_str "$cidr" 21)"
-    fi
-    sc_s="$(scope_label "$scope")"
-    cm_s="$(truncate_str "$comment" 11)"
-    row=" $(pad_right "#$rid" 5)$(pad_right "$st_s" 6)$(pad_right "$act_s" 10)$(pad_right "$pr_s" 9)$(pad_right "$pt_s" 14)$(pad_right "$ip_s" 22)$(pad_right "$sc_s" 13)$(pad_right "$cm_s" 12)"
-    printf '%s│%s%s%s│%s\n' "$C_BLUE" "$C_RESET" "$(pad_right "$row" "$W")" "$C_BLUE" "$C_RESET"
-  done < "$rf"
-  printf '%s└%s┘%s\n' "$C_BLUE" "$hline" "$C_RESET"
-  render_draft_changes "$dir"
+# Wrap UTF-8 cells without hiding addresses, comments or removed rule details.
+ui_render_grid() {
+  LC_ALL=C awk -F'|' -v blue="$C_BLUE" -v reset="$C_RESET" -v yellow="$C_YELLOW" -v red="$C_RED" '
+    function parts(s,w,a, i,b,step,cp,cw,line,k,ch) {
+      for(k in a) delete a[k]
+      line="";cw=0;k=1
+      for(i=1;i<=length(s);i+=step) {
+        b=ord[substr(s,i,1)];step=1;cp=1
+        if(b>=240){step=4;cp=2} else if(b>=224){step=3;cp=2} else if(b>=192){step=2}
+        ch=substr(s,i,step)
+        if(ch=="—" || ch=="→") cp=1
+        if(cw+cp>w){a[k++]=line;line="";cw=0}
+        line=line ch;cw+=cp
+      }
+      a[k]=line;return k
+    }
+    function width(s, i,b,w) {
+      for(i=1;i<=length(s);) {b=ord[substr(s,i,1)]; if(substr(s,i,3)=="—" || substr(s,i,3)=="→"){w++;i+=3} else if(b>=240){w+=2;i+=4} else if(b>=224){w+=2;i+=3} else if(b>=192){w++;i+=2} else {w++;i++}}
+      return w
+    }
+    function row( color, i,j,k,n,max,cell,lines,key) {
+      max=1;for(key in lines)delete lines[key]
+      for(i=1;i<=9;i++){n=parts(v[i],w[i],cell);if(n>max)max=n;for(j=1;j<=n;j++)lines[i SUBSEP j]=cell[j]}
+      for(j=1;j<=max;j++){printf "%s│%s",blue,color;for(i=1;i<=9;i++){key=i SUBSEP j;celltxt=lines[key];printf " %s%*s",celltxt,w[i]-width(celltxt),""}printf " %s│%s\n",blue,reset}
+    }
+    BEGIN {
+      for(i=0;i<256;i++)ord[sprintf("%c",i)]=i
+      split("6 4 10 10 8 12 22 12 18",w," ");total=10;for(i=1;i<=9;i++)total+=w[i]
+      for(i=0;i<total;i++)bar=bar "─"
+      printf "%s┌%s┐%s\n",blue,bar,reset
+      split("ID 状态 变更 方向/策略 协议 端口 来源/目标IP 作用范围 备注",v," ");row(blue)
+      printf "%s├%s┤%s\n",blue,bar,reset
+    }
+    NF>=10 {
+      v[1]=($2~/^[0-9]+$/?"#" $2:$2);v[2]=($3==1?"启用":"停用");v[3]=$1
+      v[4]=($5=="in"?"入站":($5=="out"?"出站":"")) ($4=="accept"?"允许":($4=="drop"?"拒绝":$4))
+      v[5]=($7=="both"?"TCP+UDP":toupper($7));v[6]=toupper($8)
+      v[7]=($9=="any"?"ANY (IPv4+IPv6)":$9)
+      v[8]=($6=="host"?"宿主机":($6=="all"?"宿主机+容器":($6=="docker"?"Docker":$6)));v[9]=$10
+      row($1=="待删除"?red:($1~/^待/?yellow:reset))
+    }
+    END {
+      note="SSH/SSH-B 在 [4] 管理，白名单范围内仍受普通规则约束；数字 ID 在 [3] 管理。"
+      printf "%s│%s %s%*s %s│%s\n",blue,reset,note,total-2-width(note),"",blue,reset
+      printf "%s└%s┘%s\n",blue,bar,reset
+    }
+  '
 }
 
 # ---------- 首次向导 ----------
@@ -1937,6 +1932,66 @@ action_backup_rescue() {
   pause_prompt
 }
 
+# Explicit user-triggered updater. Metadata is parsed as data, never sourced.
+fetch_update_file() {
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+    --connect-timeout 10 --max-time 60 --max-filesize 8388608 "$1" -o "$2"
+}
+version_is_newer() {
+  local next="$1" current="$2" i
+  local -a nv cv
+  [[ "$next" =~ ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$ ]] || return 1
+  [[ "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  IFS=. read -r -a nv <<< "$next"; IFS=. read -r -a cv <<< "$current"
+  for i in 0 1 2; do
+    (( 10#${nv[$i]} > 10#${cv[$i]} )) && return 0
+    (( 10#${nv[$i]} < 10#${cv[$i]} )) && return 1
+  done
+  return 1
+}
+install_checked_update() {
+  [[ ! -f "$CONF_DIR/locked.state" && ! -f "$CONF_DIR/fault.state" ]] || { err "当前处于隔离/故障状态，请先从控制台恢复后再更新"; return 1; }
+  install_payload "$1"
+}
+check_and_install_update() (
+  # Subshell confines download cleanup and temporary variables to this action.
+  local tmp key value seen="," release="" commit="" digest="" actual payload_version
+  [[ "$DEMO_MODE" != 1 ]] || { info "演示模式不联网、不安装更新"; return 0; }
+  check_draft_dirty
+  (( CHANGES_PENDING == 0 )) || { warn "有未应用草稿，请先应用并确认，或退出放弃草稿后再检查更新"; return 1; }
+  [[ ! -f "$(pend_file "$CONF_DIR")" ]] || { warn "有待确认配置，请先验证连接并确认，再更新脚本"; return 1; }
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/vps-fw-update.XXXXXX")" || return 1
+  # Freeze the quoted path now: function locals disappear before the subshell EXIT trap.
+  # shellcheck disable=SC2064
+  trap "rm -rf -- $(printf '%q' "$tmp")" EXIT
+  info "正在检查官方仓库更新（当前 v${VERSION}）..."
+  fetch_update_file 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/main/update.manifest' "$tmp/manifest" || { err "更新信息下载失败，原程序未更改"; return 1; }
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    [[ -n "$key" && "$seen" != *",$key,"* ]] || { err "更新信息格式错误"; return 1; }
+    seen+="$key,"
+    case "$key" in VERSION) release="$value" ;; COMMIT) commit="$value" ;; SHA256) digest="$value" ;; *) err "未知更新字段"; return 1 ;; esac
+  done < "$tmp/manifest"
+  [[ "$release" =~ ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$ && "$commit" =~ ^[0-9a-f]{40}$ && "$digest" =~ ^[0-9a-f]{64}$ ]] || { err "更新信息校验失败"; return 1; }
+  if ! version_is_newer "$release" "$VERSION"; then info "当前 v${VERSION}，仓库发布 v${release}，无需升级（不会降级）。"; return 0; fi
+  info "发现 v${release}。更新只替换程序，不自动应用规则；请先阅读仓库更新说明。"
+  ask_yesno "下载、校验并安装 v${release}？" n || return 0
+  fetch_update_file "https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/$commit/vps-fw.sh" "$tmp/payload" || { err "脚本下载失败，原程序未更改"; return 1; }
+  actual="$(hash_stdin < "$tmp/payload")" || return 1
+  [[ "$actual" == "$digest" ]] || { err "SHA256 不匹配，原程序未更改"; return 1; }
+  bash -n "$tmp/payload" || { err "脚本语法检查失败，原程序未更改"; return 1; }
+  payload_version="$(sed -n 's/^VERSION="\([0-9.]*\)"$/\1/p' "$tmp/payload")"
+  [[ "$payload_version" == "$release" ]] || { err "脚本版本与发布信息不一致"; return 1; }
+  with_lock install_checked_update "$tmp/payload" || { err "安装更新失败，请检查上方原因"; return 1; }
+  ok "已安装 v${release}。当前面板即将退出，请重新运行 fw（非 root 使用 sudo fw）。"
+  return 10
+)
+action_script_update() {
+  local rc=0
+  check_and_install_update || rc=$?
+  pause_prompt
+  return "$rc"
+}
+
 interactive_loop() {
   if [[ ! -f "$(conf_file "$CONF_DIR")" ]]; then
     init_draft_from_conf || return 1
@@ -1962,6 +2017,7 @@ interactive_loop() {
     printf '  %s[2]%s 添加高级规则 (白名单/封禁IP/出站)  %s[6]%s 应用规则 / 确认 / 隔离\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
     printf '  %s[3]%s 编辑 / 启停 / 删除 / 排序规则      %s[7]%s 查看底层 nft 规则 & 端口诊断\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
     printf '  %s[4]%s 自动交易 / 常用安全预设            %s[8]%s 版本恢复 / 紧急隔离\n' "$C_CYAN" "$C_RESET" "$C_CYAN" "$C_RESET"
+    printf '  %s[9]%s 检查脚本更新\n' "$C_CYAN" "$C_RESET"
     printf '  %s[0]%s 退出面板 (已应用的防火墙持续在后台守护)\n' "$C_DIM" "$C_RESET"
     printf '\n  请输入操作编号: '
     local choice=""
@@ -1978,6 +2034,11 @@ interactive_loop() {
       6) action_apply_confirm_menu ;;
       7) action_diagnostics ;;
       8) action_backup_rescue ;;
+      9)
+        local update_rc=0
+        action_script_update || update_rc=$?
+        [[ "$update_rc" != 10 ]] || break
+        ;;
       0|q|quit|exit)
         if (( CHANGES_PENDING == 1 )); then
           if ! ask_yesno "有尚未应用的草稿改动，确定丢弃并退出吗？" "n"; then
