@@ -13,7 +13,7 @@
 set -u
 set -o pipefail
 
-VERSION="3.1.3"
+VERSION="3.1.4"
 # 上传到 GitHub 后，可将下面地址改为你的 raw.githubusercontent.com 链接，即可支持 curl | bash 一键安装运行
 RAW_URL="${VPS_FW_RAW_URL:-https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/vps-fw.sh}"
 # 必须在顶层取值：管道启动 (curl | bash) 时顶层 BASH_SOURCE 为空，而函数内会变成 "main"，
@@ -1130,12 +1130,12 @@ ui_policy_rows() (
   local dir="$1" rf
   if load_conf "$dir" >/dev/null 2>&1; then
     case "$CFG_SSH_MODE" in
-      whitelist) printf 'SSH|1|白名单|in|host|tcp|%s|%s|其他来源拒绝\n' "$CFG_SSH_PORT" "$CFG_SSH_SOURCES" ;;
-      hidden) printf 'SSH|1|drop|in|host|tcp|%s|any|公网隐身；信任接口: %s；[4]管理\n' "$CFG_SSH_PORT" "${CFG_TRUSTED_IFS:-无}" ;;
-      none) printf 'SSH|0|按规则|in|host|tcp|%s|—|按普通规则\n' "$CFG_SSH_PORT" ;;
+      whitelist) printf 'SSH|1|accept|in|host|tcp|%s|%s|SSH白名单\n' "$CFG_SSH_PORT" "$CFG_SSH_SOURCES" ;;
+      hidden) printf 'SSH|1|drop|in|host|tcp|%s|any|SSH公网关闭\n' "$CFG_SSH_PORT" ;;
+      none) printf 'SSH|0|—|in|host|tcp|%s|—|专用策略关闭\n' "$CFG_SSH_PORT" ;;
     esac
     if [[ -n "$CFG_SSH_BLOCK" ]]; then
-      printf 'SSH-B|%s|drop|in|host|tcp|%s|%s|SSH优先黑名单\n' "$( [[ "$CFG_SSH_MODE" == none ]] && echo 0 || echo 1 )" "$CFG_SSH_PORT" "$CFG_SSH_BLOCK"
+      printf 'SSH-B|%s|drop|in|host|tcp|%s|%s|SSH黑名单\n' "$( [[ "$CFG_SSH_MODE" == none ]] && echo 0 || echo 1 )" "$CFG_SSH_PORT" "$CFG_SSH_BLOCK"
     fi
   fi
   rf="$(rules_file "$dir")"
@@ -1159,7 +1159,12 @@ render_rules_table() {
         for(i=1;i<=m;i++) {
           id=order[i]
           if(!(id in old)) print "待新增|" new[id]
-          else if(old[id]!=new[id]) {print "修改前|" old[id]; print "待修改|" new[id]}
+          else if(old[id]!=new[id]) {
+            split(old[id],a,"|"); split(new[id],b,"|"); toggle=(a[2]!=b[2])
+            for(j=3;j<=9;j++) if(a[j]!=b[j]) toggle=0
+            print "修改前|" old[id]
+            print (toggle?(b[2]==1?"待启用":"待停用"):"待修改") "|" new[id]
+          }
           else print (moved[id]?"待排序":state) "|" new[id]
         }
         for(i=1;i<=n;i++) if(!(ids[i] in new)) print "待删除|" old[ids[i]]
@@ -1203,25 +1208,24 @@ ui_render_grid() {
     }
     BEGIN {
       for(i=0;i<256;i++)ord[sprintf("%c",i)]=i
-      split("6 4 10 10 8 12 22 12 18",w," ");total=10;for(i=1;i<=9;i++)total+=w[i]
+      split("5 11 4 4 7 8 18 11 14",w," ");total=10;for(i=1;i<=9;i++)total+=w[i]
       for(i=0;i<total;i++)bar=bar "─"
       printf "%s┌%s┐%s\n",blue,bar,reset
-      split("ID 状态 变更 方向/策略 协议 端口 来源/目标IP 作用范围 备注",v," ");row(blue)
+      split("ID 状态 方向 动作 协议 端口 来源/目标IP 范围 备注",v," ");row(blue)
       printf "%s├%s┤%s\n",blue,bar,reset
     }
     NF>=10 {
-      v[1]=($2~/^[0-9]+$/?"#" $2:$2);v[2]=($3==1?"启用":"停用");v[3]=$1
-      v[4]=($5=="in"?"入站":($5=="out"?"出站":"")) ($4=="accept"?"允许":($4=="drop"?"拒绝":$4))
-      v[5]=($7=="both"?"TCP+UDP":toupper($7));v[6]=toupper($8)
-      v[7]=($9=="any"?"ANY (IPv4+IPv6)":$9)
-      v[8]=($6=="host"?"宿主机":($6=="all"?"宿主机+容器":($6=="docker"?"Docker":$6)));v[9]=$10
+      v[1]=($2~/^[0-9]+$/?"#" $2:$2)
+      enabled=($3==1?"启用":"停用")
+      v[2]=($1=="已保存"?enabled:($1=="待启用" || $1=="待停用" || $1=="待设置"?$1:$1 "/" enabled))
+      v[3]=($5=="in"?"入站":($5=="out"?"出站":"—"))
+      v[4]=($4=="accept"?"允许":($4=="drop"?"拒绝":"—"))
+      v[5]=($7=="both"?"TCP+UDP":($7=="any"?"全部":toupper($7)));v[6]=($8=="any"?"全部":$8)
+      v[7]=($9=="any"?"任意地址(双栈)":$9)
+      v[8]=($6=="host"?"宿主机":($6=="all"?"宿主机+容器":($6=="docker"?"容器":$6)));v[9]=$10
       row($1=="待删除"?red:($1~/^待/?yellow:reset))
     }
-    END {
-      note="SSH/SSH-B 在 [4] 管理，白名单范围内仍受普通规则约束；数字 ID 在 [3] 管理。"
-      printf "%s│%s %s%*s %s│%s\n",blue,reset,note,total-2-width(note),"",blue,reset
-      printf "%s└%s┘%s\n",blue,bar,reset
-    }
+    END {printf "%s└%s┘%s\n",blue,bar,reset}
   '
 }
 
