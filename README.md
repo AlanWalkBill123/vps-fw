@@ -1,6 +1,6 @@
 # VPS-FW
 
-Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.4**。
+Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当前版本 **v3.1.5**。
 
 > **严格隔离模式：** 未确认超时或检测到配置损坏时会阻断非回环 IP 流量，包括已有 SSH。不会自动撤掉保护。首次部署和故障恢复请使用商家的 VNC 控制台。
 
@@ -16,7 +16,7 @@ Debian 13 VPS 防火墙终端面板，使用 Bash、nftables 和 systemd。当�
 连接 VPS，在交互终端执行以下命令。命令会下载安装器，校验并安装主脚本，然后打开面板：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/vps-fw.sh' 'cc744821aacb3dda166be6960c990b895b72358826ce2ccbed6aa36be0878eef'
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/6f06e110891c70049523aecdb1282aff1f0d8823/install-vps-fw.sh' | sudo bash -s -- 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/6f06e110891c70049523aecdb1282aff1f0d8823/vps-fw.sh' 'd83a066a3e3b171a44c74cde046198d578a4e69125a952bbf46ec7f374b2b854'
 ```
 
 已登录为 `root` 时可去掉 `sudo`。如果提示 `curl: command not found`，先安装 curl：`apt update && apt install -y curl`（非 root 用户请使用 sudo）。
@@ -24,9 +24,9 @@ curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291f
 安装器和主脚本地址固定到同一提交；安装器会核验主脚本的 SHA256。管道中首次下载的安装器自身没有预先校验，需要信任其来源。希望先审阅安装器时，可下载并独立核验后再执行：
 
 ```bash
-curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/install-vps-fw.sh' -o install-vps-fw.sh
+curl -fsSL 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/6f06e110891c70049523aecdb1282aff1f0d8823/install-vps-fw.sh' -o install-vps-fw.sh
 # 先审阅 install-vps-fw.sh，并通过可信渠道独立核验其 SHA256
-sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/917a4d2291ff8629682f054c53edfd62ae92529f/vps-fw.sh' 'cc744821aacb3dda166be6960c990b895b72358826ce2ccbed6aa36be0878eef'
+sudo bash install-vps-fw.sh 'https://raw.githubusercontent.com/AlanWalkBill123/vps-fw/6f06e110891c70049523aecdb1282aff1f0d8823/vps-fw.sh' 'd83a066a3e3b171a44c74cde046198d578a4e69125a952bbf46ec7f374b2b854'
 ```
 
 安装后，**以后打开面板只需运行**：
@@ -39,7 +39,7 @@ sudo fw
 
 ## 首次配置、应用和确认
 
-1. 按向导核对公网网卡和 SSH 端口；如选择 SSH 白名单，确认其中包含你当前连接所用的公网出口 IP。
+1. 按向导核对公网网卡和 SSH 端口；明确选择指定 IP/CIDR 或任意来源；来源未知不会自动放行任意地址。指定来源时确认包含你当前连接所用的公网出口 IP。
 2. 应用规则后，保持原窗口和商家控制台可用，**新开一个 SSH 窗口**验证能否登录。仅有原连接正常不代表新连接一定可用。
 3. 在面板显示的倒计时内，进入菜单 `[6]` 按提示确认；也可以在新窗口执行：
 
@@ -91,9 +91,9 @@ sudo fw
    ```
 
 3. 重新运行本页“首次安装并打开面板”中的一键命令。安装器会校验新版并替换程序；无需卸载旧版，现有配置会保留。
-4. 检查面板标题是否为 **v3.1.4**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
+4. 检查面板标题是否为 **v3.1.5**。以后仍用 `sudo fw` 打开面板；root 用户直接运行 `fw`。
 
-**v3.1.3 → v3.1.4 只整理规则表显示，无需为本次升级重新应用规则。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
+**v3.1.4 → v3.1.5 更新首次向导与 SSH 管理入口，不迁移现有策略，无需仅为升级重新应用规则。已有任意来源规则不会被自动收紧，需自行核对。** 如果你在面板里修改了草稿，则仍须通过 `[6]` 应用，并按提示确认。
 
 ## 规则表怎么看？
 
@@ -103,7 +103,7 @@ sudo fw
 - **修改前**：例如 `修改前/启用` 是旧值对照；相同 ID 的下一行是草稿目标。新修改需通过 `[6]` 应用；`待确认` 表示规则已应用，仍在确认倒计时中。
 - **方向与动作**：方向只有入站、出站；动作统一为允许、拒绝。`—` 表示不适用，不表示放行。
 - **来源/目标 IP**：入站看来源，出站看目标；`任意地址(双栈)` 包括 IPv4 与 IPv6。协议或端口的 `全部` 表示不限制该字段，长内容在单元格内换行。
-- **SSH 行**：白名单显示为 `入站 / 允许`，来源列给出允许范围；该范围仍受普通规则顺序约束。SSH/SSH-B 在 `[4]` 管理，普通数字 ID 在 `[3]` 管理。`SSH` 行停用表示专用策略关闭，不等于实际 SSH 服务已关闭。
+- **SSH 行**：白名单显示为 `入站 / 允许`，来源列给出允许范围；该范围仍受普通规则顺序约束。SSH/SSH-B 可在 `[3] → [4]` 管理，也可在删除输入中单独输入 `SSH` 或 `SSH-B`。关闭公网 SSH 与取消专用限制是两个明确选项，均需确认后写入草稿；黑名单可单独修改或清除。专用策略关闭时不显示占位行，待删除对照仍保留。原 `[4]` 预设入口保留。
 
 状态描述的是配置及待处理操作；实际防护健康状态请看上方状态面板或执行 `fw health`。
 
@@ -141,6 +141,7 @@ python3 tests/test_local.py
 python3 tests/test_installer.py
 python3 tests/test_ui.py
 python3 tests/test_update.py
+python3 tests/test_ssh_setup.py
 ```
 
 以上测试使用临时目录与模拟命令，不安装防火墙，不访问 GitHub。安装器测试需要支持 PTY 的 Unix 环境。测试范围和真实 Debian 虚拟机验证摘要见 [测试说明](docs/TESTING.md)。
